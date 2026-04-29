@@ -35,6 +35,7 @@ from cbb.train.model import (
     train_loto,
     train_production,
 )
+from cbb.evaluate import from_season_dict
 
 load_dotenv()
 
@@ -218,10 +219,31 @@ def compute_all_features(
 
 
 @task
-def run_training(matchups: pd.DataFrame, features: list[str]) -> LoTOResult:
+def run_training(
+    matchups: pd.DataFrame,
+    features: list[str],
+    config: ModelConfig | None = None,
+) -> LoTOResult:
     """LOTO training + calibration + temperature scaling."""
     mlflow.set_tracking_uri(MLFLOW_URI)
-    return train_loto(matchups, features, mlflow_experiment=EXPERIMENT)
+    return train_loto(matchups, features, config=config, mlflow_experiment=EXPERIMENT)
+
+
+@task
+def log_eval_summary(loto: LoTOResult, holdout_season: int) -> None:
+    """Log a human-readable eval summary; surfaces holdout season Brier prominently."""
+    log = get_run_logger()
+    result = from_season_dict(loto.brier_by_season, n_games=len(loto.matchups))
+    holdout = result.season(holdout_season)
+    log.info(
+        "Eval — LOTO avg: %.6f  |  %d holdout: %s  |  n_games: %d",
+        loto.overall_brier,
+        holdout_season,
+        f"{holdout:.6f}" if holdout is not None else "n/a (season not in data)",
+        result.n_games,
+    )
+    for season in sorted(result.per_season):
+        log.info("  brier_%d = %.6f", season, result.per_season[season])
 
 
 @task
@@ -252,6 +274,9 @@ def run_production_training(
 def cbb_pipeline(
     season: int | None = None,
     kenpom_snapshot_date: str | None = None,
+    holdout_season: int = 2026,
+    xgb_params: dict | None = None,
+    num_rounds: int | None = None,
 ):
     """End-to-end CBB pipeline: ingest → features → train → log.
 
@@ -259,10 +284,19 @@ def cbb_pipeline(
         season: Season year (e.g. 2027). Defaults to current year.
         kenpom_snapshot_date: Date for KenPom archive snapshot (YYYY-MM-DD).
                               Use Selection Sunday date for tournament predictions.
+        holdout_season: Season to highlight in eval summary (default: 2026).
+        xgb_params: Override XGBoost params for experiment runs.
+        num_rounds: Override boosting rounds for experiment runs.
     """
     log = get_run_logger()
     season = season or date.today().year
     log.info("Running CBB pipeline for season=%d", season)
+
+    config = ModelConfig()
+    if xgb_params:
+        config.xgb_params.update(xgb_params)
+    if num_rounds is not None:
+        config.num_rounds = num_rounds
 
     # KenPom ingestion is optional — training runs on Kaggle box scores alone.
     # Skipped gracefully if KENPOM_API_KEY is not yet configured.
@@ -300,7 +334,8 @@ def cbb_pipeline(
     features = [f for f in feature_candidates if f in matchups.columns]
     matchups[features] = matchups[features].fillna(0)
 
-    loto = run_training(matchups, features)
+    loto = run_training(matchups, features, config)
+    log_eval_summary(loto, holdout_season)
     run_production_training(matchups, features, loto)
 
     log.info("Pipeline complete. LOTO Brier: %.6f", loto.overall_brier)

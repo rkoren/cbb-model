@@ -27,3 +27,6 @@ docs/*.pdf
 
 # generated Terraform (produced on demand by `recipes apply`, never committed)
 infra/tf/
+
+# claude
+CLAUDE.md
