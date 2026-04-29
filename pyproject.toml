@@ -1,0 +1,42 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cbb-model"
+version = "0.1.0"
+description = "College basketball tournament prediction pipeline"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27",
+    "pandas>=2.0",
+    "numpy>=1.26",
+    "scikit-learn>=1.4",
+    "xgboost>=2.0",
+    "scipy>=1.12",
+    "statsmodels>=0.14",
+    "mlflow>=2.12",
+    "dvc[s3]>=3.49",
+    "prefect>=3.0",
+    "evidently>=0.4",
+    "fastapi>=0.111",
+    "uvicorn>=0.29",
+    "python-dotenv>=1.0",
+    "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "httpx>=0.27",
+    "ipykernel>=6.0",
+    "jupyter>=1.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cbb"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

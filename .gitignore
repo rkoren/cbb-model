@@ -1,0 +1,29 @@
+# secrets
+.env
+
+# data (DVC-tracked — commit .dvc files, not the data itself)
+data/raw/*
+data/processed/*
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+.venv/
+
+# ml artifacts
+mlruns/
+*.pkl
+*.joblib
+
+# notebooks
+.ipynb_checkpoints/
+
+# docs (keep the PDF out of git)
+docs/*.pdf
+
+# generated Terraform (produced on demand by `recipes apply`, never committed)
+infra/tf/
