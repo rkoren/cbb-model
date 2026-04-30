@@ -111,6 +111,60 @@ def compute_massey_ranks(
     return team_massey.set_index(["Season", "TeamID"])["MasseyRank"].to_dict()
 
 
+def _build_lookups(
+    adj_eff: pd.DataFrame,
+    season_avgs: pd.DataFrame,
+    elo_df: pd.DataFrame,
+    quality_df: pd.DataFrame,
+    form_df: pd.DataFrame,
+) -> tuple:
+    ae_lkp = adj_eff.set_index(["men_women", "Season", "TeamID"])
+    avg_lkp = season_avgs.set_index(["men_women", "Season", "TeamID"])
+    elo_lkp = elo_df.set_index(["men_women", "Season", "TeamID"])["Elo"].to_dict()
+    qual_lkp = quality_df.set_index(["men_women", "Season", "TeamID"])["Quality"].to_dict()
+    form_lkp = form_df.set_index(["men_women", "Season", "TeamID"])["RecentWinPct"].to_dict()
+    return ae_lkp, avg_lkp, elo_lkp, qual_lkp, form_lkp
+
+
+def get_team_features(
+    mw: int,
+    season: int,
+    team: int,
+    ae_lkp,
+    avg_lkp,
+    elo_lkp: dict,
+    qual_lkp: dict,
+    form_lkp: dict,
+    seed_lookup: dict,
+    massey_lookup: dict | None = None,
+) -> dict:
+    """Look up all features for a single team-season. Returns dict of raw values."""
+    key = (mw, season, team)
+    feats: dict = {}
+    try:
+        ae = ae_lkp.loc[key]
+        for c in _AE_COLS:
+            feats[c] = float(ae[c]) if c in ae.index else np.nan
+    except KeyError:
+        for c in _AE_COLS:
+            feats[c] = np.nan
+    try:
+        av = avg_lkp.loc[key]
+        for c in _AVG_COLS:
+            feats[c] = float(av[c]) if c in av.index else np.nan
+    except KeyError:
+        for c in _AVG_COLS:
+            feats[c] = np.nan
+    feats["Elo"] = _safe_get(elo_lkp, key)
+    feats["Quality"] = _safe_get(qual_lkp, key)
+    feats["Form"] = _safe_get(form_lkp, key)
+    feats["Seed"] = _safe_get(seed_lookup, (season, team))
+    massey_lookup = massey_lookup or {}
+    # Massey is Men's only; Women's receive 0 (neutral) so the feature stays useful
+    feats["MasseyRank"] = _safe_get(massey_lookup, (season, team), 0.0) if mw == 0 else 0.0
+    return feats
+
+
 def build_matchup_dataset(
     tourn_sym: pd.DataFrame,
     reg_sym: pd.DataFrame,
@@ -149,44 +203,17 @@ def build_matchup_dataset(
         DataFrame with A_*, B_*, d_* feature columns, Outcome, PointDiff,
         sample_weight, and quality_wtd_margin differentials.
     """
-    ae_lkp = adj_eff.set_index(["men_women", "Season", "TeamID"])
-    avg_lkp = season_avgs.set_index(["men_women", "Season", "TeamID"])
-    elo_lkp = elo_df.set_index(["men_women", "Season", "TeamID"])["Elo"].to_dict()
-    qual_lkp = quality_df.set_index(["men_women", "Season", "TeamID"])["Quality"].to_dict()
-    form_lkp = form_df.set_index(["men_women", "Season", "TeamID"])["RecentWinPct"].to_dict()
+    ae_lkp, avg_lkp, elo_lkp, qual_lkp, form_lkp = _build_lookups(
+        adj_eff, season_avgs, elo_df, quality_df, form_df
+    )
     massey_lookup = massey_lookup or {}
-
-    def _get_features(mw: int, season: int, team: int) -> dict:
-        key = (mw, season, team)
-        feats: dict = {}
-        try:
-            ae = ae_lkp.loc[key]
-            for c in _AE_COLS:
-                feats[c] = float(ae[c]) if c in ae.index else np.nan
-        except KeyError:
-            for c in _AE_COLS:
-                feats[c] = np.nan
-        try:
-            av = avg_lkp.loc[key]
-            for c in _AVG_COLS:
-                feats[c] = float(av[c]) if c in av.index else np.nan
-        except KeyError:
-            for c in _AVG_COLS:
-                feats[c] = np.nan
-        feats["Elo"] = _safe_get(elo_lkp, key)
-        feats["Quality"] = _safe_get(qual_lkp, key)
-        feats["Form"] = _safe_get(form_lkp, key)
-        feats["Seed"] = _safe_get(seed_lookup, (season, team))
-        # Massey is Men's only; Women's receive 0 (neutral) so the feature stays useful
-        feats["MasseyRank"] = _safe_get(massey_lookup, (season, team), 0.0) if mw == 0 else 0.0
-        return feats
 
     records = []
     for _, row in tqdm(tourn_sym.iterrows(), total=len(tourn_sym), desc="Matchups"):
         mw, season = int(row["men_women"]), int(row["Season"])
         ta, tb = int(row["T1_TeamID"]), int(row["T2_TeamID"])
-        fa = _get_features(mw, season, ta)
-        fb = _get_features(mw, season, tb)
+        fa = get_team_features(mw, season, ta, ae_lkp, avg_lkp, elo_lkp, qual_lkp, form_lkp, seed_lookup, massey_lookup)
+        fb = get_team_features(mw, season, tb, ae_lkp, avg_lkp, elo_lkp, qual_lkp, form_lkp, seed_lookup, massey_lookup)
 
         rec: dict = {
             "Season": season,
@@ -224,3 +251,65 @@ def build_matchup_dataset(
     matchups["d_quality_wtd_margin"] = matchups["A_quality_wtd_margin"] - matchups["B_quality_wtd_margin"]
 
     return matchups
+
+
+def build_prediction_features(
+    pairs: pd.DataFrame,
+    adj_eff: pd.DataFrame,
+    season_avgs: pd.DataFrame,
+    elo_df: pd.DataFrame,
+    quality_df: pd.DataFrame,
+    form_df: pd.DataFrame,
+    seed_lookup: dict[tuple[int, int], int],
+    massey_lookup: dict[tuple[int, int], float] | None = None,
+    reg_sym: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Build A/B matchup features for prediction (no outcome columns).
+
+    Same feature extraction as build_matchup_dataset but for unseen matchups.
+    Typically used to generate Kaggle submission predictions.
+
+    Args:
+        pairs: DataFrame with Season, men_women, A_TeamID, B_TeamID.
+               For Kaggle format, A_TeamID < B_TeamID (lower ID first).
+        adj_eff: Output of compute_adj_efficiency() (optionally KenPom-merged).
+        season_avgs: Output of add_four_factors(compute_season_averages()).
+        elo_df: Output of compute_elo() for both genders concatenated.
+        quality_df: Output of compute_glm_quality().
+        form_df: Output of compute_recent_form().
+        seed_lookup: Dict mapping (Season, TeamID) → seed number.
+        massey_lookup: Dict mapping (Season, TeamID) → Massey z-score.
+        reg_sym: If provided, compute quality_wtd_margin differentials.
+
+    Returns:
+        DataFrame with A_*, B_*, d_* feature columns (no Outcome/PointDiff).
+    """
+    ae_lkp, avg_lkp, elo_lkp, qual_lkp, form_lkp = _build_lookups(
+        adj_eff, season_avgs, elo_df, quality_df, form_df
+    )
+    massey_lookup = massey_lookup or {}
+
+    records = []
+    for _, row in pairs.iterrows():
+        mw, season = int(row["men_women"]), int(row["Season"])
+        ta, tb = int(row["A_TeamID"]), int(row["B_TeamID"])
+        fa = get_team_features(mw, season, ta, ae_lkp, avg_lkp, elo_lkp, qual_lkp, form_lkp, seed_lookup, massey_lookup)
+        fb = get_team_features(mw, season, tb, ae_lkp, avg_lkp, elo_lkp, qual_lkp, form_lkp, seed_lookup, massey_lookup)
+        rec: dict = {"Season": season, "men_women": mw, "A_TeamID": ta, "B_TeamID": tb}
+        for c in FEAT_COLS:
+            rec[f"A_{c}"] = fa.get(c, np.nan)
+            rec[f"B_{c}"] = fb.get(c, np.nan)
+            rec[f"d_{c}"] = fa.get(c, np.nan) - fb.get(c, np.nan)
+        records.append(rec)
+
+    pred_df = pd.DataFrame(records)
+
+    if reg_sym is not None:
+        qwm = compute_quality_wtd_margin(reg_sym, adj_eff)
+        qwm_a = qwm.rename(columns={"TeamID": "A_TeamID", "quality_wtd_margin": "A_quality_wtd_margin"})
+        qwm_b = qwm.rename(columns={"TeamID": "B_TeamID", "quality_wtd_margin": "B_quality_wtd_margin"})
+        pred_df = pred_df.merge(qwm_a, on=["Season", "men_women", "A_TeamID"], how="left")
+        pred_df = pred_df.merge(qwm_b, on=["Season", "men_women", "B_TeamID"], how="left")
+        pred_df["d_quality_wtd_margin"] = pred_df["A_quality_wtd_margin"] - pred_df["B_quality_wtd_margin"]
+
+    return pred_df

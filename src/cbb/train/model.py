@@ -56,6 +56,8 @@ class ModelConfig:
     logistic_C: float = 1.0
     # NIL sample weighting (disabled by default — see matchup.py)
     nil_year: int = 2022
+    # MLflow tag identifying this model variant for comparison and promotion
+    model_variant: str = "baseline"
 
 
 @dataclass
@@ -68,6 +70,7 @@ class LoTOResult:
     overall_brier: float
     brier_by_season: dict[int, float]
     features: list[str]
+    loto_run_id: str | None = None  # MLflow run ID; used by flow to log production model to same run
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -126,8 +129,11 @@ def train_loto(
     calibrators: dict[int, object] = {}
     all_probs_raw = np.full(len(matchups), np.nan)
 
+    loto_run_id: str | None = None
     with mlflow.start_run(run_name="loto_training") if mlflow_experiment else _null_ctx():
         if mlflow_experiment:
+            loto_run_id = mlflow.active_run().info.run_id
+            mlflow.set_tag("model_variant", config.model_variant)
             mlflow.log_params({
                 "num_rounds": config.num_rounds,
                 "num_features": len(features),
@@ -278,6 +284,7 @@ def train_loto(
         overall_brier=overall_brier,
         brier_by_season=brier_by_season,
         features=features,
+        loto_run_id=loto_run_id,
     )
 
 
@@ -288,19 +295,18 @@ def train_production(
     features: list[str],
     temp_params: dict,
     config: ModelConfig | None = None,
-    mlflow_experiment: str | None = None,
 ) -> tuple[xgb.Booster, object]:
     """Train a single model on all seasons for deployment.
 
     Uses temperature params from the LOTO run — they were estimated on held-out
-    data so there's no leakage from reusing them here.
+    data so there's no leakage from reusing them here. MLflow artifact logging
+    is handled by the caller so artifacts land in the same run as LOTO metrics.
 
     Args:
         matchups: Full matchup dataset.
         features: Same feature list used in train_loto().
         temp_params: temp_params from LoTOResult.
         config: Hyperparameter config.
-        mlflow_experiment: If set, log artifact to this MLflow experiment.
 
     Returns:
         (xgb_booster, calibrator) ready for prediction.
@@ -321,14 +327,6 @@ def train_production(
         LogisticRegression(solver="liblinear", C=config.logistic_C, max_iter=300, random_state=0),
     )
     calibrator.fit(leaf_strings, y_outcome)
-
-    if mlflow_experiment:
-        mlflow.set_experiment(mlflow_experiment)
-        with mlflow.start_run(run_name="production_model"):
-            mlflow.log_params({"num_rounds": config.num_rounds, "num_features": len(features)})
-            mlflow.sklearn.log_model(calibrator, "calibrator")
-            booster.save_model("/tmp/booster.ubj")
-            mlflow.log_artifact("/tmp/booster.ubj", "xgb_model")
 
     return booster, calibrator
 
@@ -375,6 +373,68 @@ def predict(
         prob = vegas_alpha * prob + (1 - vegas_alpha) * vegas_prob
 
     return prob
+
+
+def predict_batch(
+    pred_df: pd.DataFrame,
+    features: list[str],
+    booster: xgb.Booster,
+    calibrator: object,
+    temp_params: dict,
+    vegas_alpha: float = 1.0,
+    men_blowout_gap: int = 10,
+    women_blowout_gap: int = 8,
+) -> np.ndarray:
+    """Vectorized win probability for a batch of matchups.
+
+    Mirrors the temperature scaling logic in train_loto exactly — same four
+    temperature bins (M/W × close/blowout) applied to all rows at once.
+
+    Args:
+        pred_df: DataFrame with all columns in features, plus men_women, A_Seed, B_Seed.
+        features: Feature column names used during training.
+        booster: Production XGBoost booster.
+        calibrator: Production logistic calibrator.
+        temp_params: Temperature params from LoTOResult (T_M_close, etc.).
+        vegas_alpha: Blend weight (1 = pure model, 0 = pure Vegas).
+        men_blowout_gap: Seed gap threshold for men's blowout category.
+        women_blowout_gap: Seed gap threshold for women's blowout category.
+
+    Returns:
+        Array of calibrated win probabilities, one per row (P(A wins)).
+    """
+    x = pred_df[features].fillna(0).values
+    dm = xgb.DMatrix(x)
+    leaf_mat = booster.predict(dm, pred_leaf=True)
+    raw_probs = calibrator.predict_proba(_make_leaf_strings(leaf_mat))[:, 1]
+
+    mw = pred_df["men_women"].values
+    seed_gap = (pred_df["A_Seed"] - pred_df["B_Seed"]).abs().fillna(0).values
+
+    M_close = (mw == 0) & (seed_gap <= men_blowout_gap)
+    M_blow  = (mw == 0) & (seed_gap >  men_blowout_gap)
+    W_close = (mw == 1) & (seed_gap <= women_blowout_gap)
+    W_blow  = (mw == 1) & (seed_gap >  women_blowout_gap)
+
+    probs = np.zeros(len(pred_df))
+    for mask, key in [
+        (M_close, "T_M_close"),
+        (M_blow,  "T_M_blowout"),
+        (W_close, "T_W_close"),
+        (W_blow,  "T_W_blowout"),
+    ]:
+        if mask.any():
+            probs[mask] = _apply_temperature(raw_probs[mask], temp_params[key])
+
+    if "vegas_prob" in pred_df.columns:
+        has_vegas = pred_df["vegas_prob"].notna().values
+        probs = np.where(
+            has_vegas,
+            vegas_alpha * probs + (1 - vegas_alpha) * pred_df["vegas_prob"].fillna(0).values,
+            probs,
+        )
+
+    return probs
 
 
 # ── Rating optimization (Nelder-Mead blend) ───────────────────────────────────

@@ -10,6 +10,7 @@ import os
 log = logging.getLogger(__name__)
 
 _REGION = os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
+_KENPOM_SECRET_ARN = "arn:aws:secretsmanager:us-east-1:674325521451:secret:kenpom_key-OxN5Kg"
 _RAW_CACHE: dict[str, str] = {}
 
 
@@ -54,5 +55,5 @@ def kenpom_api_key() -> str:
     if val := os.environ.get("KENPOM_API_KEY"):
         return val
     import json
-    raw = get_raw_secret("kenpom_key")
+    raw = get_raw_secret(_KENPOM_SECRET_ARN)
     return json.loads(raw)["KENPOM_API_KEY"]

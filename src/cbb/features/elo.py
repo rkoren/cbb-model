@@ -10,8 +10,8 @@ def _expected(elo_a: float, elo_b: float, width: float) -> float:
 def compute_elo(
     reg_raw: pd.DataFrame,
     men_women_flag: int,
-    base_elo: float = 1500.0,
-    k_factor: float = 32.0,
+    base_elo: float = 1000.0,
+    k_factor: float = 100.0,
     width: float = 400.0,
 ) -> pd.DataFrame:
     """End-of-season Elo per (Season, TeamID), reset to base_elo each season.

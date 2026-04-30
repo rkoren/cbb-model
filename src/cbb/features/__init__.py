@@ -3,7 +3,8 @@ from .four_factors import add_four_factors, compute_season_averages
 from .elo import compute_elo
 from .form import compute_recent_form
 from .glm_quality import compute_glm_quality
-from .matchup import build_matchup_dataset, compute_massey_ranks, compute_quality_wtd_margin
+from .matchup import build_matchup_dataset, build_prediction_features, compute_massey_ranks, compute_quality_wtd_margin, get_team_features
+from .path import compute_path_features
 
 __all__ = [
     "compute_adj_efficiency",
@@ -15,4 +16,7 @@ __all__ = [
     "compute_quality_wtd_margin",
     "compute_massey_ranks",
     "build_matchup_dataset",
+    "build_prediction_features",
+    "get_team_features",
+    "compute_path_features",
 ]

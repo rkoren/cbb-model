@@ -1,16 +1,24 @@
-"""Prefect pipeline: ingest KenPom → build features → train → log to MLflow.
+"""Baseline model: iterative efficiency + four factors + Elo + GLM quality + Massey.
 
-Run locally:
-    python flows/pipeline_flow.py
+This is the active production model. All feature engineering mirrors the
+efficiency_approach.ipynb notebook. Compare against experiments/challenger.py
+to evaluate new feature additions.
 
-Schedule via Prefect UI or CLI:
-    prefect deployment build flows/pipeline_flow.py:cbb_pipeline -n prod
+Run locally (from repo root):
+    python experiments/baseline.py
+
+Schedule via Prefect UI:
+    prefect deployment build experiments/baseline.py:cbb_pipeline -n prod
 """
 
+import json
 import os
+import pickle
 from datetime import date
+from itertools import combinations
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
 from prefect import flow, task, get_run_logger
@@ -29,11 +37,13 @@ from cbb.features import (
     compute_glm_quality,
     compute_massey_ranks,
     build_matchup_dataset,
+    build_prediction_features,
 )
 from cbb.train.model import (
     ModelConfig,
     LoTOResult,
     optimize_rating_weights,
+    predict_batch,
     train_loto,
     train_production,
 )
@@ -198,6 +208,7 @@ def compute_all_features(
 
     adj_eff = compute_adj_efficiency(reg_sym)
     log.info("adj_eff: %d rows, mean iters %.1f", len(adj_eff), adj_eff["iters"].mean())
+    DATA_PROC.mkdir(parents=True, exist_ok=True)
 
     # Merge official KenPom efficiency for men's games where cached parquets exist.
     # Women's rows are always preserved from manual computation.
@@ -215,16 +226,28 @@ def compute_all_features(
                 log.warning("KenPom merge failed for season %d: %s", s, e)
     if kenpom_merged_count:
         log.info("KenPom efficiency merged for %d/%d seasons", kenpom_merged_count, len(seasons_in_data))
+    # Save post-KenPom so adj_eff.parquet reflects the final merged values
+    adj_eff.to_parquet(DATA_PROC / "adj_eff.parquet", index=False)
 
     season_avgs = add_four_factors(compute_season_averages(reg_sym))
+    season_avgs.to_parquet(DATA_PROC / "season_avgs.parquet", index=False)
 
     M_elo = compute_elo(data["M_reg_raw"], men_women_flag=0)
     W_elo = compute_elo(data["W_reg_raw"], men_women_flag=1)
     elo_df = pd.concat([M_elo, W_elo], ignore_index=True)
+    elo_df.to_parquet(DATA_PROC / "elo_df.parquet", index=False)
 
     form_df = compute_recent_form(reg_sym)
+    form_df.to_parquet(DATA_PROC / "form_df.parquet", index=False)
+
     quality_df = compute_glm_quality(reg_sym)
+    quality_df.to_parquet(DATA_PROC / "quality_df.parquet", index=False)
+
     massey_lookup = compute_massey_ranks(data["massey"])
+    pd.DataFrame(
+        [(s, t, v) for (s, t), v in massey_lookup.items()],
+        columns=["Season", "TeamID", "MasseyRank"],
+    ).to_parquet(DATA_PROC / "massey_lookup.parquet", index=False)
 
     # Seed lookup: (Season, TeamID) → seed number
     def _parse_seed(s):
@@ -234,6 +257,9 @@ def compute_all_features(
     seeds = pd.concat([data["M_seeds"], data["W_seeds"]], ignore_index=True)
     seeds["SeedNum"] = seeds["Seed"].apply(_parse_seed)
     seed_lookup = seeds.set_index(["Season", "TeamID"])["SeedNum"].to_dict()
+    seeds[["Season", "TeamID", "SeedNum"]].dropna().astype({"Season": int, "TeamID": int, "SeedNum": int}).to_parquet(
+        DATA_PROC / "seed_lookup.parquet", index=False
+    )
 
     matchups = build_matchup_dataset(
         tourn_sym=tourn_sym,
@@ -259,11 +285,14 @@ def compute_all_features(
     matchups["d_Rating"] = (matchups[z_cols] * opt_weights).sum(axis=1)
 
     log.info("Matchup dataset: %s", matchups.shape)
-    out = DATA_PROC / "matchups.parquet"
-    matchups.to_parquet(out, index=False)
-    log.info("Saved matchups to %s", out)
+    matchups.to_parquet(DATA_PROC / "matchups.parquet", index=False)
 
     rating_meta = {"opt_weights": opt_weights.tolist(), "z_cols": z_cols}
+    with open(DATA_PROC / "rating_meta.json", "w") as f:
+        json.dump(rating_meta, f)
+    with open(DATA_PROC / "scaler.pkl", "wb") as f:
+        pickle.dump(scaler, f)
+
     return matchups, rating_meta, {"scaler": scaler}
 
 
@@ -306,20 +335,132 @@ def run_production_training(
     matchups: pd.DataFrame,
     features: list[str],
     loto: LoTOResult,
-) -> None:
-    """Train and register the production model artifact."""
-    booster, calibrator = train_production(
-        matchups,
-        features,
-        loto.temp_params,
-        mlflow_experiment=EXPERIMENT,
-    )
+) -> tuple:
+    """Train production model on all seasons, save locally, log to LOTO run."""
+    import mlflow.sklearn
+    booster, calibrator = train_production(matchups, features, loto.temp_params)
     log = get_run_logger()
     log.info(
         "Production model trained. Brier LOTO=%.6f  T_M_close=%.3f",
         loto.overall_brier,
         loto.temp_params["T_M_close"],
     )
+    # Save locally for submission generation (avoids MLflow round-trip)
+    DATA_PROC.mkdir(parents=True, exist_ok=True)
+    booster.save_model(str(DATA_PROC / "prod_booster.ubj"))
+    with open(DATA_PROC / "prod_calibrator.pkl", "wb") as f:
+        pickle.dump(calibrator, f)
+    # Log model artifact back into the LOTO run so it's co-located with metrics
+    if loto.loto_run_id:
+        with mlflow.start_run(run_id=loto.loto_run_id):
+            mlflow.sklearn.log_model(calibrator, "calibrator")
+            mlflow.log_artifact(str(DATA_PROC / "prod_booster.ubj"), "xgb_model")
+        log.info("Production artifacts logged to LOTO run %s", loto.loto_run_id)
+    return booster, calibrator
+
+
+def _run_submission(
+    season: int,
+    data: dict,
+    reg_sym: pd.DataFrame,
+    booster,
+    calibrator,
+    loto: LoTOResult,
+    rating_meta: dict,
+    scaler,
+    pre_predict_hook=None,
+) -> pd.DataFrame:
+    """Build and save the Kaggle submission CSV for the given season.
+
+    Generates all C(68, 2) seeded matchup pairs for both men's and women's
+    tournaments (A_TeamID < B_TeamID, matching Kaggle ID format), computes
+    features from saved parquets, runs prediction, and writes
+    data/processed/submission_{season}.csv.
+
+    Args:
+        season: Target season year.
+        data: Kaggle data dict from load_kaggle_data.
+        reg_sym: Symmetric regular-season game log.
+        booster: Production XGBoost booster.
+        calibrator: Production logistic calibrator.
+        loto: LoTOResult with temp_params, features, vegas_alpha.
+        rating_meta: Dict with opt_weights and z_cols.
+        scaler: Fitted StandardScaler for Z_FEATURES → z_cols transform.
+        pre_predict_hook: Optional callable(pred_df) → pred_df applied before
+                          prediction — used by challenger to inject derived features.
+
+    Returns:
+        Submission DataFrame with ID and Pred columns.
+    """
+    adj_eff = pd.read_parquet(DATA_PROC / "adj_eff.parquet")
+    season_avgs = pd.read_parquet(DATA_PROC / "season_avgs.parquet")
+    elo_df = pd.read_parquet(DATA_PROC / "elo_df.parquet")
+    quality_df = pd.read_parquet(DATA_PROC / "quality_df.parquet")
+    form_df = pd.read_parquet(DATA_PROC / "form_df.parquet")
+    massey_lookup = (
+        pd.read_parquet(DATA_PROC / "massey_lookup.parquet")
+        .set_index(["Season", "TeamID"])["MasseyRank"]
+        .to_dict()
+    )
+    seed_lookup = (
+        pd.read_parquet(DATA_PROC / "seed_lookup.parquet")
+        .set_index(["Season", "TeamID"])["SeedNum"]
+        .to_dict()
+    )
+
+    # All C(68, 2) seeded pairs; A_TeamID < B_TeamID matches Kaggle ID format
+    pair_rows = []
+    for mw, seed_key in [(0, "M_seeds"), (1, "W_seeds")]:
+        season_seeds = data[seed_key][data[seed_key]["Season"] == season]
+        team_ids = sorted(season_seeds["TeamID"].unique())
+        for ta, tb in combinations(team_ids, 2):
+            pair_rows.append({"Season": season, "men_women": mw, "A_TeamID": ta, "B_TeamID": tb})
+    pairs = pd.DataFrame(pair_rows)
+
+    pred_df = build_prediction_features(
+        pairs, adj_eff, season_avgs, elo_df, quality_df, form_df,
+        seed_lookup, massey_lookup, reg_sym,
+    )
+
+    # Compute d_Rating: apply same scaler + opt_weights from training
+    z_cols = rating_meta["z_cols"]
+    base_feats = [c.replace("_z", "") for c in z_cols]
+    z_scaled = scaler.transform(pred_df[base_feats].fillna(0))
+    for i, c in enumerate(z_cols):
+        pred_df[c] = z_scaled[:, i]
+    opt_weights = np.array(rating_meta["opt_weights"])
+    pred_df["d_Rating"] = (pred_df[z_cols] * opt_weights).sum(axis=1)
+
+    if pre_predict_hook is not None:
+        pred_df = pre_predict_hook(pred_df)
+
+    probs = predict_batch(
+        pred_df, loto.features, booster, calibrator, loto.temp_params, loto.vegas_alpha,
+    )
+
+    ids = [f"{r.Season}_{r.A_TeamID}_{r.B_TeamID}" for r in pairs.itertuples()]
+    submission = pd.DataFrame({"ID": ids, "Pred": probs})
+    out = DATA_PROC / f"submission_{season}.csv"
+    submission.to_csv(out, index=False)
+    return submission
+
+
+@task
+def generate_submission(
+    season: int,
+    data: dict,
+    reg_sym: pd.DataFrame,
+    booster,
+    calibrator,
+    loto: LoTOResult,
+    rating_meta: dict,
+    scaler,
+) -> pd.DataFrame:
+    """Generate and save the Kaggle submission for the target season."""
+    log = get_run_logger()
+    sub = _run_submission(season, data, reg_sym, booster, calibrator, loto, rating_meta, scaler)
+    log.info("Submission saved (%d rows) → %s", len(sub), DATA_PROC / f"submission_{season}.csv")
+    return sub
 
 
 # ── Flow ───────────────────────────────────────────────────────────────────────
@@ -349,14 +490,14 @@ def cbb_pipeline(
     tracking.configure_from_env()
     tracking.init_experiment(EXPERIMENT)
 
-    config = ModelConfig()
+    config = ModelConfig(model_variant="baseline")
     if xgb_params:
         config.xgb_params.update(xgb_params)
     if num_rounds is not None:
         config.num_rounds = num_rounds
 
     exp_config = ExperimentConfig(
-        name=f"cbb-{season}",
+        name=f"cbb-baseline-{season}",
         params={**config.xgb_params, "num_rounds": config.num_rounds},
     )
 
@@ -370,7 +511,7 @@ def cbb_pipeline(
     except Exception as e:
         log.warning("KenPom ingestion skipped: %s", e)
     reg_sym, tourn_sym = build_symmetric_games(data)
-    matchups, rating_meta, _ = compute_all_features(reg_sym, tourn_sym, data)
+    matchups, rating_meta, artifacts = compute_all_features(reg_sym, tourn_sym, data)
 
     # Build feature list (same logic as notebook FEATURES list, filtered to present cols)
     feature_candidates = [
@@ -399,7 +540,8 @@ def cbb_pipeline(
 
     loto = run_training(matchups, features, config, exp_config)
     log_eval_summary(loto, holdout_season)
-    run_production_training(matchups, features, loto)
+    booster, calibrator = run_production_training(matchups, features, loto)
+    generate_submission(season, data, reg_sym, booster, calibrator, loto, rating_meta, artifacts["scaler"])
 
     log.info("Pipeline complete. LOTO Brier: %.6f", loto.overall_brier)
 

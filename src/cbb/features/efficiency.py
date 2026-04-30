@@ -19,7 +19,7 @@ _FT_FACTOR = 0.475
 def compute_adj_efficiency(
     reg_sym: pd.DataFrame,
     max_iter: int = 50,
-    tol: float = 0.01,
+    tol: float = 1e-4,
     hca_oe: float = 1.4,
 ) -> pd.DataFrame:
     """Compute AdjOE, AdjDE, AdjEM, AdjTempo per (Season, men_women, TeamID).
