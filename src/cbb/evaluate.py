@@ -1,4 +1,4 @@
-"""CBB-specific evaluation methodology built on mlplatform.evaluate.
+"""CBB-specific evaluation methodology built on kitchen.evaluate.
 
 Defines how tournament prediction quality is measured: per-season Brier
 breakdown over LOTO folds, with a named holdout season surfaced separately.
@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from mlplatform.evaluate import brier_score
+from kitchen.evaluate import brier_score
 
 
 @dataclass

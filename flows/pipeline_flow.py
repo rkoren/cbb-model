@@ -11,11 +11,13 @@ import os
 from datetime import date
 from pathlib import Path
 
-import mlflow
 import pandas as pd
 from dotenv import load_dotenv
 from prefect import flow, task, get_run_logger
 from sklearn.preprocessing import StandardScaler
+
+from kitchen import tracking
+from kitchen.experiment import ExperimentConfig, log_config
 
 from cbb.kenpom import KenPomClient
 from cbb.features import (
@@ -36,12 +38,12 @@ from cbb.train.model import (
     train_production,
 )
 from cbb.evaluate import from_season_dict
+from cbb.kenpom.features import build_team_name_map, load_kenpom_efficiency, merge_kenpom_efficiency
 
 load_dotenv()
 
 DATA_RAW = Path(os.environ.get("DATA_RAW_DIR", "data/raw"))
 DATA_PROC = Path(os.environ.get("DATA_PROC_DIR", "data/processed"))
-MLFLOW_URI = os.environ.get("MLFLOW_TRACKING_URI", "http://localhost:5000")
 EXPERIMENT = os.environ.get("MLFLOW_EXPERIMENT", "cbb-tournament")
 
 # ── Feature columns used in training (keep in sync with model artifacts) ──────
@@ -49,6 +51,36 @@ Z_FEATURES = ["d_AdjEM", "d_Elo", "d_Quality", "d_Form"]
 
 
 # ── Tasks ─────────────────────────────────────────────────────────────────────
+
+@task
+def ingest_all_kenpom_seasons(seasons: list[int], snapshot_date: str | None = None) -> None:
+    """Fetch and cache KenPom ratings for all seasons, skipping already-saved ones.
+
+    Uses ratings_archive(date=snapshot_date) for the most recent season when
+    snapshot_date is provided (avoids post-tournament leakage). All other seasons
+    use ratings(year=s) — tournament is already over, no leakage risk.
+
+    Run this once before training; parquets persist across runs.
+    """
+    log = get_run_logger()
+    client = KenPomClient()
+
+    for s in seasons:
+        out = DATA_PROC / f"kenpom_ratings_{s}.parquet"
+        if out.exists():
+            log.info("KenPom ratings for %d already cached — skipping", s)
+            continue
+        try:
+            if snapshot_date and s == max(seasons):
+                df = client.ratings_archive(date=snapshot_date)
+                log.info("Fetched KenPom archive for %d at %s (%d teams)", s, snapshot_date, len(df))
+            else:
+                df = client.ratings(year=s)
+                log.info("Fetched KenPom ratings for %d (%d teams)", s, len(df))
+            df.to_parquet(out, index=False)
+        except Exception as e:
+            log.warning("KenPom fetch failed for season %d: %s", s, e)
+
 
 @task(retries=3, retry_delay_seconds=30)
 def ingest_kenpom_ratings(season: int, snapshot_date: str | None = None) -> pd.DataFrame:
@@ -167,6 +199,23 @@ def compute_all_features(
     adj_eff = compute_adj_efficiency(reg_sym)
     log.info("adj_eff: %d rows, mean iters %.1f", len(adj_eff), adj_eff["iters"].mean())
 
+    # Merge official KenPom efficiency for men's games where cached parquets exist.
+    # Women's rows are always preserved from manual computation.
+    seasons_in_data = sorted(reg_sym["Season"].unique())
+    kenpom_merged_count = 0
+    for s in seasons_in_data:
+        kenpom_path = DATA_PROC / f"kenpom_ratings_{s}.parquet"
+        if kenpom_path.exists():
+            try:
+                team_map = build_team_name_map(data["M_teams"], KenPomClient().teams(year=s))
+                kenpom_eff = load_kenpom_efficiency(s, kenpom_path, team_map)
+                adj_eff = merge_kenpom_efficiency(adj_eff, kenpom_eff)
+                kenpom_merged_count += 1
+            except Exception as e:
+                log.warning("KenPom merge failed for season %d: %s", s, e)
+    if kenpom_merged_count:
+        log.info("KenPom efficiency merged for %d/%d seasons", kenpom_merged_count, len(seasons_in_data))
+
     season_avgs = add_four_factors(compute_season_averages(reg_sym))
 
     M_elo = compute_elo(data["M_reg_raw"], men_women_flag=0)
@@ -223,10 +272,16 @@ def run_training(
     matchups: pd.DataFrame,
     features: list[str],
     config: ModelConfig | None = None,
+    exp_config: ExperimentConfig | None = None,
 ) -> LoTOResult:
     """LOTO training + calibration + temperature scaling."""
-    mlflow.set_tracking_uri(MLFLOW_URI)
-    return train_loto(matchups, features, config=config, mlflow_experiment=EXPERIMENT)
+    return train_loto(
+        matchups,
+        features,
+        config=config,
+        exp_config=exp_config,
+        mlflow_experiment=EXPERIMENT,
+    )
 
 
 @task
@@ -253,7 +308,6 @@ def run_production_training(
     loto: LoTOResult,
 ) -> None:
     """Train and register the production model artifact."""
-    mlflow.set_tracking_uri(MLFLOW_URI)
     booster, calibrator = train_production(
         matchups,
         features,
@@ -292,20 +346,29 @@ def cbb_pipeline(
     season = season or date.today().year
     log.info("Running CBB pipeline for season=%d", season)
 
+    tracking.configure_from_env()
+    tracking.init_experiment(EXPERIMENT)
+
     config = ModelConfig()
     if xgb_params:
         config.xgb_params.update(xgb_params)
     if num_rounds is not None:
         config.num_rounds = num_rounds
 
-    # KenPom ingestion is optional — training runs on Kaggle box scores alone.
-    # Skipped gracefully if KENPOM_API_KEY is not yet configured.
-    try:
-        ingest_kenpom_ratings(season=season, snapshot_date=kenpom_snapshot_date)
-    except Exception as e:
-        log.warning("KenPom ingestion skipped: %s", e)
+    exp_config = ExperimentConfig(
+        name=f"cbb-{season}",
+        params={**config.xgb_params, "num_rounds": config.num_rounds},
+    )
 
     data = load_kaggle_data(season=season)
+
+    # Ingest KenPom ratings for all training seasons (skips already-cached seasons).
+    # Training falls back to manual efficiency for any season without a cached parquet.
+    try:
+        all_seasons = sorted(data["M_reg_raw"]["Season"].unique().tolist())
+        ingest_all_kenpom_seasons(seasons=all_seasons, snapshot_date=kenpom_snapshot_date)
+    except Exception as e:
+        log.warning("KenPom ingestion skipped: %s", e)
     reg_sym, tourn_sym = build_symmetric_games(data)
     matchups, rating_meta, _ = compute_all_features(reg_sym, tourn_sym, data)
 
@@ -334,7 +397,7 @@ def cbb_pipeline(
     features = [f for f in feature_candidates if f in matchups.columns]
     matchups[features] = matchups[features].fillna(0)
 
-    loto = run_training(matchups, features, config)
+    loto = run_training(matchups, features, config, exp_config)
     log_eval_summary(loto, holdout_season)
     run_production_training(matchups, features, loto)
 

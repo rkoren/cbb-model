@@ -38,5 +38,5 @@ dev = [
 packages = ["src/cbb"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["src/cbb/tests"]
 asyncio_mode = "auto"
