@@ -107,9 +107,9 @@ def promote(
     version = register_model(run_id, "calibrator", model_name)
     print(f"Registered {model_name} v{version}")
 
-    promote_model(model_name, version, stage="Production")
-    print(f"Promoted {model_name} v{version} → Production")
-    print(f"Load with: mlflow.sklearn.load_model('models:/{model_name}/{version}')")
+    promote_model(model_name, version)
+    print(f"Promoted {model_name} v{version} → champion")
+    print(f"Load with: mlflow.sklearn.load_model('models:/{model_name}@champion')")
 
 
 if __name__ == "__main__":
