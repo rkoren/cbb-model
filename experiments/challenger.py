@@ -114,6 +114,7 @@ def challenger_pipeline(
     holdout_season: int = 2026,
     xgb_params: dict | None = None,
     num_rounds: int | None = None,
+    generate_sub: bool = False,
     competition: str | None = None,
     submission_message: str = "",
     fetch_lb_score: bool = False,
@@ -130,6 +131,8 @@ def challenger_pipeline(
         holdout_season: Season to highlight in eval summary (default: 2026).
         xgb_params: Override XGBoost params for experiment runs.
         num_rounds: Override boosting rounds for experiment runs.
+        generate_sub: Generate a submission CSV after training (default False).
+                      Use flows/submit.py to generate from a specific run later.
         competition: Kaggle competition slug. When set, uploads the submission.
         submission_message: Message shown on the Kaggle leaderboard.
         fetch_lb_score: Poll for the public LB score after uploading.
@@ -238,12 +241,13 @@ def challenger_pipeline(
     loto = run_training(matchups, features, config, exp_config)
     log_eval_summary(loto, holdout_season)
     booster, calibrator = run_production_training(matchups, features, loto)
-    generate_submission(
-        season, data, reg_sym, booster, calibrator, loto, rating_meta, artifacts["scaler"],
-        competition=competition, message=submission_message, fetch_lb_score=fetch_lb_score,
-    )
+    if generate_sub:
+        generate_submission(
+            season, data, reg_sym, booster, calibrator, loto, rating_meta, artifacts["scaler"],
+            competition=competition, message=submission_message, fetch_lb_score=fetch_lb_score,
+        )
 
-    log.info("Challenger pipeline complete. LOTO Brier: %.6f", loto.overall_brier)
+    log.info("Challenger pipeline complete. LOTO Brier: %.6f  run_id=%s", loto.overall_brier, loto.loto_run_id)
 
 
 if __name__ == "__main__":

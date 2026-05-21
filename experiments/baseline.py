@@ -353,9 +353,16 @@ def run_production_training(
         pickle.dump(calibrator, f)
     # Log model artifact back into the LOTO run so it's co-located with metrics
     if loto.loto_run_id:
+        loto_meta = {"features": loto.features, "temp_params": loto.temp_params, "vegas_alpha": loto.vegas_alpha}
+        loto_meta_path = DATA_PROC / "loto_meta.json"
+        with open(loto_meta_path, "w") as f:
+            json.dump(loto_meta, f)
         with mlflow.start_run(run_id=loto.loto_run_id):
             mlflow.sklearn.log_model(calibrator, "calibrator")
             mlflow.log_artifact(str(DATA_PROC / "prod_booster.ubj"), "xgb_model")
+            mlflow.log_artifact(str(DATA_PROC / "rating_meta.json"), "run_meta")
+            mlflow.log_artifact(str(DATA_PROC / "scaler.pkl"), "run_meta")
+            mlflow.log_artifact(str(loto_meta_path), "run_meta")
         log.info("Production artifacts logged to LOTO run %s", loto.loto_run_id)
     return booster, calibrator
 
@@ -503,6 +510,7 @@ def cbb_pipeline(
     holdout_season: int = 2026,
     xgb_params: dict | None = None,
     num_rounds: int | None = None,
+    generate_sub: bool = False,
     competition: str | None = None,
     submission_message: str = "",
     fetch_lb_score: bool = False,
@@ -516,6 +524,8 @@ def cbb_pipeline(
         holdout_season: Season to highlight in eval summary (default: 2026).
         xgb_params: Override XGBoost params for experiment runs.
         num_rounds: Override boosting rounds for experiment runs.
+        generate_sub: Generate a submission CSV after training (default False).
+                      Use flows/submit.py to generate from a specific run later.
         competition: Kaggle competition slug. When set, uploads the submission.
         submission_message: Message shown on the Kaggle leaderboard.
         fetch_lb_score: Poll for the public LB score after uploading.
@@ -578,12 +588,13 @@ def cbb_pipeline(
     loto = run_training(matchups, features, config, exp_config)
     log_eval_summary(loto, holdout_season)
     booster, calibrator = run_production_training(matchups, features, loto)
-    generate_submission(
-        season, data, reg_sym, booster, calibrator, loto, rating_meta, artifacts["scaler"],
-        competition=competition, message=submission_message, fetch_lb_score=fetch_lb_score,
-    )
+    if generate_sub:
+        generate_submission(
+            season, data, reg_sym, booster, calibrator, loto, rating_meta, artifacts["scaler"],
+            competition=competition, message=submission_message, fetch_lb_score=fetch_lb_score,
+        )
 
-    log.info("Pipeline complete. LOTO Brier: %.6f", loto.overall_brier)
+    log.info("Pipeline complete. LOTO Brier: %.6f  run_id=%s", loto.overall_brier, loto.loto_run_id)
 
 
 if __name__ == "__main__":
