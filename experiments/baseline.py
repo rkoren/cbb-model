@@ -26,6 +26,7 @@ from sklearn.preprocessing import StandardScaler
 
 from kitchen import tracking
 from kitchen.experiment import ExperimentConfig, log_config
+from kitchen.submit import log_submission
 
 from cbb.kenpom import KenPomClient
 from cbb.features import (
@@ -455,11 +456,41 @@ def generate_submission(
     loto: LoTOResult,
     rating_meta: dict,
     scaler,
+    competition: str | None = None,
+    message: str = "",
+    fetch_lb_score: bool = False,
 ) -> pd.DataFrame:
-    """Generate and save the Kaggle submission for the target season."""
+    """Generate, validate, and log the Kaggle submission for the target season.
+
+    Args:
+        competition: Kaggle competition slug. When set, uploads the submission.
+        message: Submission message shown on the leaderboard.
+        fetch_lb_score: Poll for the public LB score after uploading (requires competition).
+    """
     log = get_run_logger()
     sub = _run_submission(season, data, reg_sym, booster, calibrator, loto, rating_meta, scaler)
-    log.info("Submission saved (%d rows) → %s", len(sub), DATA_PROC / f"submission_{season}.csv")
+    sub_path = DATA_PROC / f"submission_{season}.csv"
+    sample_path = DATA_RAW / "SampleSubmissionStage1.csv"
+
+    if sample_path.exists():
+        import pandas as _pd
+        sample = _pd.read_csv(sample_path)
+        result = log_submission(
+            submission=sub,
+            sample=sample,
+            file_path=sub_path,
+            id_col="ID",
+            target_col="Pred",
+            competition=competition,
+            message=message,
+            fetch_lb_score=fetch_lb_score,
+        )
+        if "lb_score" in result:
+            log.info("Leaderboard score: %.6f", result["lb_score"])
+    else:
+        log.warning("SampleSubmissionStage1.csv not found — skipping validation and MLflow artifact logging")
+
+    log.info("Submission saved (%d rows) → %s", len(sub), sub_path)
     return sub
 
 
@@ -472,8 +503,11 @@ def cbb_pipeline(
     holdout_season: int = 2026,
     xgb_params: dict | None = None,
     num_rounds: int | None = None,
+    competition: str | None = None,
+    submission_message: str = "",
+    fetch_lb_score: bool = False,
 ):
-    """End-to-end CBB pipeline: ingest → features → train → log.
+    """End-to-end CBB pipeline: ingest → features → train → log → submit.
 
     Args:
         season: Season year (e.g. 2027). Defaults to current year.
@@ -482,6 +516,9 @@ def cbb_pipeline(
         holdout_season: Season to highlight in eval summary (default: 2026).
         xgb_params: Override XGBoost params for experiment runs.
         num_rounds: Override boosting rounds for experiment runs.
+        competition: Kaggle competition slug. When set, uploads the submission.
+        submission_message: Message shown on the Kaggle leaderboard.
+        fetch_lb_score: Poll for the public LB score after uploading.
     """
     log = get_run_logger()
     season = season or date.today().year
@@ -541,7 +578,10 @@ def cbb_pipeline(
     loto = run_training(matchups, features, config, exp_config)
     log_eval_summary(loto, holdout_season)
     booster, calibrator = run_production_training(matchups, features, loto)
-    generate_submission(season, data, reg_sym, booster, calibrator, loto, rating_meta, artifacts["scaler"])
+    generate_submission(
+        season, data, reg_sym, booster, calibrator, loto, rating_meta, artifacts["scaler"],
+        competition=competition, message=submission_message, fetch_lb_score=fetch_lb_score,
+    )
 
     log.info("Pipeline complete. LOTO Brier: %.6f", loto.overall_brier)
 

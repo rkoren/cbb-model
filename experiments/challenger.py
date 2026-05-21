@@ -29,6 +29,7 @@ from prefect import flow, task, get_run_logger
 
 from kitchen import tracking
 from kitchen.experiment import ExperimentConfig
+from kitchen.submit import log_submission
 
 # Re-use all shared tasks from the baseline experiment — no duplication
 from baseline import (
@@ -58,6 +59,9 @@ def generate_submission(
     loto,
     rating_meta: dict,
     scaler,
+    competition: str | None = None,
+    message: str = "",
+    fetch_lb_score: bool = False,
 ) -> object:
     """Challenger submission: baseline features + derived interactions + zeroed path features."""
     log = get_run_logger()
@@ -77,7 +81,27 @@ def generate_submission(
         season, data, reg_sym, booster, calibrator, loto, rating_meta, scaler,
         pre_predict_hook=_challenger_hook,
     )
-    log.info("Challenger submission saved (%d rows) → %s", len(sub), DATA_PROC / f"submission_{season}.csv")
+    sub_path = DATA_PROC / f"submission_{season}.csv"
+    sample_path = DATA_RAW / "SampleSubmissionStage1.csv"
+
+    if sample_path.exists():
+        sample = pd.read_csv(sample_path)
+        result = log_submission(
+            submission=sub,
+            sample=sample,
+            file_path=sub_path,
+            id_col="ID",
+            target_col="Pred",
+            competition=competition,
+            message=message,
+            fetch_lb_score=fetch_lb_score,
+        )
+        if "lb_score" in result:
+            log.info("Leaderboard score: %.6f", result["lb_score"])
+    else:
+        log.warning("SampleSubmissionStage1.csv not found — skipping validation and MLflow artifact logging")
+
+    log.info("Challenger submission saved (%d rows) → %s", len(sub), sub_path)
     return sub
 
 load_dotenv()
@@ -90,6 +114,9 @@ def challenger_pipeline(
     holdout_season: int = 2026,
     xgb_params: dict | None = None,
     num_rounds: int | None = None,
+    competition: str | None = None,
+    submission_message: str = "",
+    fetch_lb_score: bool = False,
 ):
     """Challenger pipeline: baseline features + path features + derived interactions.
 
@@ -103,6 +130,9 @@ def challenger_pipeline(
         holdout_season: Season to highlight in eval summary (default: 2026).
         xgb_params: Override XGBoost params for experiment runs.
         num_rounds: Override boosting rounds for experiment runs.
+        competition: Kaggle competition slug. When set, uploads the submission.
+        submission_message: Message shown on the Kaggle leaderboard.
+        fetch_lb_score: Poll for the public LB score after uploading.
     """
     log = get_run_logger()
     season = season or date.today().year
@@ -208,7 +238,10 @@ def challenger_pipeline(
     loto = run_training(matchups, features, config, exp_config)
     log_eval_summary(loto, holdout_season)
     booster, calibrator = run_production_training(matchups, features, loto)
-    generate_submission(season, data, reg_sym, booster, calibrator, loto, rating_meta, artifacts["scaler"])
+    generate_submission(
+        season, data, reg_sym, booster, calibrator, loto, rating_meta, artifacts["scaler"],
+        competition=competition, message=submission_message, fetch_lb_score=fetch_lb_score,
+    )
 
     log.info("Challenger pipeline complete. LOTO Brier: %.6f", loto.overall_brier)
 
