@@ -26,7 +26,7 @@ from sklearn.preprocessing import StandardScaler
 
 from kitchen import tracking
 from kitchen.experiment import ExperimentConfig, log_config
-from kitchen.submit import log_submission
+from kitchen.submit import check_feature_parity, log_submission
 
 from cbb.kenpom import KenPomClient
 from cbb.features import (
@@ -441,6 +441,13 @@ def _run_submission(
 
     if pre_predict_hook is not None:
         pred_df = pre_predict_hook(pred_df)
+
+    parity_errors = check_feature_parity(loto.features, pred_df)
+    if parity_errors:
+        raise RuntimeError(
+            "Feature parity check failed — submission features don't match training:\n"
+            + "\n".join(f"  {e}" for e in parity_errors)
+        )
 
     probs = predict_batch(
         pred_df, loto.features, booster, calibrator, loto.temp_params, loto.vegas_alpha,
