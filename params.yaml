@@ -1,0 +1,115 @@
+experiment: cbb-tournament
+
+data:
+  source: local          # Kaggle CSVs are DVC-managed; run `dvc pull` to populate data/raw/
+  path: data/raw
+
+mlflow:
+  tracking_uri: sqlite:///mlruns.db
+  model_artifact_path: cbb_model
+  artifact_bucket: reilly-cbb-model-data
+
+monitor:
+  reference_file: reference.parquet   # seasons <= 2023 (training distribution)
+  current_file: current.parquet       # seasons 2024-2025 (recent matchups)
+  local_path: monitoring/drift.html
+  drift_threshold: 0.05
+
+submission:
+  id_col: ID
+  target_col: Pred
+  competition: march-machine-learning-mania-2025
+  sample_submission: SampleSubmissionStage1.csv
+  message: "kitchen-platform baseline"
+
+thresholds:
+  loto_brier:
+    max: 0.175            # CI fails if Brier degrades past this
+
+features:
+  raw_files:
+    - MRegularSeasonDetailedResults
+    - WRegularSeasonDetailedResults
+    - MNCAATourneyDetailedResults
+    - WNCAATourneyDetailedResults
+    - MNCAATourneySeeds
+    - WNCAATourneySeeds
+    - MTeams
+    - WTeams
+    - MMasseyOrdinals
+  processed_file: matchups.parquet
+  z_features:
+    - d_AdjEM
+    - d_Elo
+    - d_Quality
+    - d_Form
+
+model:
+  variant: baseline
+  eta: 0.01
+  subsample: 0.6
+  colsample_bynode: 0.8
+  max_depth: 4
+  num_rounds: 700
+  seed_gap_men: 10
+  seed_gap_women: 8
+  calibrator_C: 1.0
+  # XGBoost params kept constant (tuned in efficiency_approach.ipynb — depth=5 was +0.000498 worse)
+  num_parallel_tree: 2
+  min_child_weight: 4
+  max_bin: 32
+
+evaluate:
+  holdout_season: 2026
+  metrics_file: metrics.json
+
+# Feature columns sent to XGBoost (filtered to those present in matchup DataFrame)
+feature_candidates:
+  - men_women
+  - d_AdjEM
+  - d_AdjOE
+  - d_AdjDE
+  - d_AdjTempo
+  - d_Rating
+  - d_Elo
+  - d_Quality
+  - A_Seed
+  - B_Seed
+  - d_Seed
+  - d_Form
+  - d_MasseyRank
+  - A_MasseyRank
+  - B_MasseyRank
+  - d_avg_PointDiff
+  - d_avg_Score
+  - d_eFGpct
+  - d_TOpct
+  - d_ORpct
+  - d_FTrate
+  - d_TSpct
+  - d_opp_eFGpct
+  - d_opp_TOpct
+  - d_opp_ORpct
+  - d_opp_FTrate
+  - d_opp_TSpct
+  - d_FG3pct
+  - d_FG2pct
+  - d_FTpct
+  - d_opp_FG3pct
+  - d_opp_FG2pct
+  - d_opp_FTpct
+  - d_3PArate
+  - d_opp_3PArate
+  - d_ASTrate
+  - d_opp_ASTrate
+  - d_Blkpct
+  - d_Stlpct
+  - d_NonStlTOpct
+  - d_opp_NonStlTOpct
+  - d_pct_pts_3
+  - d_pct_pts_2
+  - d_pct_pts_ft
+  - d_opp_pct_pts_3
+  - d_opp_pct_pts_2
+  - d_opp_pct_pts_ft
+  - d_quality_wtd_margin

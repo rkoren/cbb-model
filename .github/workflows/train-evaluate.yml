@@ -1,0 +1,160 @@
+name: Train & Evaluate
+
+# Runs on every push to main and on every PR.
+# Steps: features → train → evaluate → post metrics as PR comment (on PRs).
+# On push to main only: promotes the best run to the champion alias.
+#
+# Required secrets:
+#   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY  — for `dvc pull` from S3
+#   KAGGLE_USERNAME, KAGGLE_KEY               — for Kaggle data validation
+#   KENPOM_API_KEY                            — optional KenPom ratings enrichment
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  train-evaluate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    env:
+      MLFLOW_TRACKING_URI: sqlite:///mlruns.db
+      MLFLOW_EXPERIMENT: cbb-tournament
+      MLFLOW_ARTIFACT_BUCKET: reilly-cbb-model-data
+      KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+      KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
+      KENPOM_API_KEY: ${{ secrets.KENPOM_API_KEY }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install -e ../kitchen-platform/kitchen -e . --quiet
+          # kitchen-platform is a sibling repo; in CI, install from the
+          # published package instead:
+          # pip install rkoren-kitchen -e . --quiet
+
+      - name: Pull data (DVC)
+        run: dvc pull --quiet
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Pre-flight check
+        run: kitchen check
+
+      - name: Build features
+        run: kitchen run features
+
+      - name: Train model (and promote if this run beats champion)
+        # --auto-promote ensures a champion alias always exists before evaluate runs.
+        # On the first CI run (no prior champion) it promotes unconditionally.
+        # On subsequent runs it promotes only if loto_brier improves.
+        run: |
+          kitchen run train \
+            --auto-promote \
+            --promote-metric loto_brier \
+            --lower-is-better \
+            --model-name cbb-tournament-model
+
+      - name: Evaluate champion model
+        run: kitchen run evaluate --flavor sklearn
+
+      - name: Show metrics
+        run: kitchen report || cat metrics.json
+
+      - name: Check thresholds
+        run: |
+          python - <<'EOF'
+          import json, sys
+          with open("metrics.json") as f:
+              metrics = json.load(f)
+          with open("params.yaml") as f:
+              import yaml
+              params = yaml.safe_load(f)
+          thresholds = params.get("thresholds", {})
+          failures = []
+          for name, spec in thresholds.items():
+              val = metrics.get(name)
+              if val is None:
+                  continue
+              if isinstance(spec, (int, float)):
+                  if val < spec:
+                      failures.append(f"{name}={val:.6f} < required {spec:.6f}")
+              else:
+                  if spec.get("min") is not None and val < spec["min"]:
+                      failures.append(f"{name}={val:.6f} < min {spec['min']:.6f}")
+                  if spec.get("max") is not None and val > spec["max"]:
+                      failures.append(f"{name}={val:.6f} > max {spec['max']:.6f}")
+          if failures:
+              print("THRESHOLD FAILURES:")
+              for f in failures:
+                  print(f"  ✗ {f}")
+              sys.exit(1)
+          print("All thresholds passed ✓")
+          EOF
+
+      # Post metrics as a PR comment (pull_request events only)
+      - name: Comment metrics on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const metrics = JSON.parse(fs.readFileSync('metrics.json', 'utf8'));
+            const lines = Object.entries(metrics)
+              .map(([k, v]) => `| \`${k}\` | ${typeof v === 'number' ? v.toFixed(6) : v} |`)
+              .join('\n');
+            const body = `## Model Evaluation Metrics\n\n| Metric | Value |\n|---|---|\n${lines}`;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body
+            });
+
+  # Promote the best run to champion alias on every push to main
+  promote:
+    needs: train-evaluate
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      MLFLOW_TRACKING_URI: sqlite:///mlruns.db
+      MLFLOW_EXPERIMENT: cbb-tournament
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install rkoren-kitchen -e . --quiet
+
+      - name: Promote best run to champion
+        run: |
+          kitchen promote loto_brier \
+            --lower-is-better \
+            --model-name cbb-tournament-model \
+            --experiment cbb-tournament

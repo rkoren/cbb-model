@@ -61,6 +61,77 @@ class ModelConfig:
 
 
 @dataclass
+class CBBModel:
+    """Production model bundle: XGBoost booster + leaf calibrator + temperature params + Vegas alpha.
+
+    This is the single artifact exchanged between train → evaluate → submission → serving.
+    All components are picklable, so the bundle can be logged as an MLflow sklearn artifact
+    (cloudpickle serialisation) and loaded back with ``mlflow.sklearn.load_model``.
+
+    Usage::
+
+        probs = model.predict_batch(pred_df)   # vectorized batch inference
+        prob  = model.predict_one(feature_row) # single-row inference
+
+    See ``predict_batch()`` in this module for the full docstring.
+    """
+
+    booster: xgb.Booster
+    calibrator: object           # sklearn TF-IDF → LogisticRegression pipeline
+    temp_params: dict            # T_M_close, T_M_blowout, T_W_close, T_W_blowout
+    vegas_alpha: float           # 0 = pure Vegas, 1 = pure model
+    features: list[str]
+    men_blowout_gap: int = 10
+    women_blowout_gap: int = 8
+
+    def predict_batch(self, pred_df: pd.DataFrame) -> np.ndarray:
+        """Vectorized win probability for a batch of matchups.
+
+        Thin wrapper around the module-level ``predict_batch()`` function that
+        uses this model's stored configuration — no need to pass booster,
+        calibrator, or temp_params separately.
+
+        Args:
+            pred_df: DataFrame with all feature columns plus men_women, A_Seed, B_Seed.
+
+        Returns:
+            Array of calibrated win probabilities (P(A wins)), one per row.
+        """
+        return predict_batch(
+            pred_df,
+            self.features,
+            self.booster,
+            self.calibrator,
+            self.temp_params,
+            self.vegas_alpha,
+            self.men_blowout_gap,
+            self.women_blowout_gap,
+        )
+
+    def predict_one(
+        self,
+        feature_row: pd.DataFrame,
+        men_women: int,
+        seed_gap: float | None = None,
+        vegas_prob: float | None = None,
+    ) -> float:
+        """Win probability for a single matchup row.
+
+        Thin wrapper around the module-level ``predict()`` function.
+        """
+        return predict(
+            feature_row,
+            self.booster,
+            self.calibrator,
+            self.temp_params,
+            men_women,
+            seed_gap=seed_gap,
+            vegas_prob=vegas_prob,
+            vegas_alpha=self.vegas_alpha,
+        )
+
+
+@dataclass
 class LoTOResult:
     matchups: pd.DataFrame          # input matchups + pred_prob_raw, pred_prob, pred_prob_final
     xgb_models: dict[int, xgb.Booster]
@@ -71,6 +142,28 @@ class LoTOResult:
     brier_by_season: dict[int, float]
     features: list[str]
     loto_run_id: str | None = None  # MLflow run ID; used by flow to log production model to same run
+
+    def to_model(self, booster: xgb.Booster, calibrator: object) -> CBBModel:
+        """Wrap the production booster + calibrator into a CBBModel artifact.
+
+        Uses the temp_params, vegas_alpha, and feature list already stored in
+        this LoTOResult — these were fit on held-out data so they're safe to
+        reuse for the production (all-seasons) model without leakage.
+
+        Args:
+            booster: Production XGBoost booster (trained on all seasons).
+            calibrator: Production logistic calibrator (trained on all seasons).
+
+        Returns:
+            CBBModel ready for ``predict_batch()`` and MLflow artifact logging.
+        """
+        return CBBModel(
+            booster=booster,
+            calibrator=calibrator,
+            temp_params=self.temp_params,
+            vegas_alpha=self.vegas_alpha,
+            features=self.features,
+        )
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
