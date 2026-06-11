@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>cbb-tournament — Results Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 2rem; background: #f9fafb; color: #111; }
+    h1 { font-size: 1.5rem; margin-bottom: 0.5rem; }
+    #chart-wrap { max-width: 860px; margin-bottom: 2rem; }
+    #runs-table { border-collapse: collapse; width: 100%; font-size: 0.875rem; }
+    th, td { padding: 0.35rem 0.75rem; border: 1px solid #e2e8f0; text-align: left; white-space: nowrap; }
+    th { background: #f1f5f9; }
+    tr.champion { background: #fef9c3; font-weight: 600; }
+    .dpos { color: #16a34a; }
+    .dneg { color: #dc2626; }
+    #status { color: #6b7280; margin-bottom: 1rem; font-size: 0.9rem; }
+    .scroll-wrap { overflow-x: auto; margin-top: 1rem; }
+    h2 { font-size: 1.1rem; margin: 2rem 0 0.5rem; }
+    #lb-wrap, #fold-wrap, #pcoord-wrap, #cal-wrap { max-width: 860px; margin-bottom: 2rem; }
+    #pcoord-note, #cal-note { color: #6b7280; font-size: 0.8rem; margin: 0 0 0.5rem; }
+    #fi-table td { text-align: center; font-variant-numeric: tabular-nums; }
+    #fi-table td.fi-empty { background: #f8fafc; color: #cbd5e1; }
+    #fi-table th:first-child, #fi-table td:first-child { text-align: left; font-weight: 500; }
+  </style>
+</head>
+<body>
+  <h1>cbb-tournament — Results Dashboard</h1>
+  <p id="status">1 run(s) loaded. Generated: 2026-06-11 05:31 UTC</p>
+  <div id="chart-wrap"><canvas id="chart"></canvas></div>
+  <div id="lb-wrap" style="display:none"><h2>Submission history — LB score vs local metric</h2><canvas id="lb-chart"></canvas></div>
+  <div id="fold-wrap" style="display:none"><h2>Per-fold metric breakdown</h2><canvas id="fold-chart"></canvas></div>
+  <div id="pcoord-wrap" style="display:none"><h2>Parameter parallel coordinates</h2><p id="pcoord-note"></p><canvas id="pcoord-chart"></canvas></div>
+  <div id="cal-wrap" style="display:none"><h2>Calibration (reliability) curve</h2><p id="cal-note">A perfectly calibrated model sits on the dashed diagonal.</p><canvas id="cal-chart"></canvas></div>
+  <div class="scroll-wrap">
+    <table id="runs-table"><thead id="thead"></thead><tbody id="tbody"></tbody></table>
+  </div>
+  <div id="fi-wrap" style="display:none"><h2>Feature importance across runs</h2><div id="fi-heatmap" class="scroll-wrap"></div></div>
+  <script>
+    var RESULTS = [{"sha": "ddf0718c0c4fcb547de6f1ddd4064beb40accd41", "timestamp": "2026-06-10T22:51:45.260167+00:00", "run_id": "b7fce37e6b98459190991f3148eb03c0", "metrics": {"loto_brier": 0.12194380063167616, "brier_2003": 0.1294494635927504, "brier_2004": 0.13071614034874046, "brier_2005": 0.12554577506307396, "brier_2006": 0.14725752910724507, "brier_2007": 0.11576673583627284, "brier_2008": 0.10547520343235983, "brier_2009": 0.12951620422657933, "brier_2010": 0.1228581933239217, "brier_2011": 0.12190563520677852, "brier_2012": 0.11715201301903616, "brier_2013": 0.12379294032798421, "brier_2014": 0.12896187098808154, "brier_2015": 0.10780697575319496, "brier_2016": 0.12218944277861189, "brier_2017": 0.11346952040713629, "brier_2018": 0.12630288459368186, "brier_2019": 0.10612425526463105, "brier_2021": 0.12937429596505648, "brier_2022": 0.13145853126593618, "brier_2023": 0.1455728240096244, "brier_2024": 0.12131875614007082, "brier_2025": 0.09591879532893598, "vegas_alpha": 1.0, "T_M_close": 1.309571305957976, "T_M_blowout": 0.8628592016794302, "T_W_close": 1.2919511099975725, "T_W_blowout": 0.4834541157529799}, "params": {"experiment": "cbb-tournament", "data.source": "local", "data.path": "data/raw", "mlflow.tracking_uri": "sqlite:///mlruns.db", "mlflow.artifact_bucket": "reilly-cbb-model-data", "submission.id_col": "ID", "submission.target_col": "Pred", "submission.competition": "march-machine-learning-mania-2025", "submission.sample_submission": "SampleSubmissionStage1.csv", "submission.message": "kitchen-platform baseline", "thresholds.loto_brier.max": "0.175", "features.raw_files": "['MRegularSeasonDetailedResults', 'WRegularSeasonDetailedResults', 'MNCAATourneyDetailedResults', 'WNCAATourneyDetailedResults', 'MNCAATourneySeeds', 'WNCAATourneySeeds', 'MTeams', 'WTeams', 'MMasseyOrdinals']", "features.processed_file": "matchups.parquet", "features.z_features": "['d_AdjEM', 'd_Elo', 'd_Quality', 'd_Form']", "model.variant": "baseline", "model.eta": "0.01", "model.subsample": "0.6", "model.colsample_bynode": "0.8", "model.max_depth": "4", "model.num_rounds": "700", "model.seed_gap_men": "10", "model.seed_gap_women": "8", "model.calibrator_C": "1.0", "model.num_parallel_tree": "2", "model.min_child_weight": "4", "model.max_bin": "32", "evaluate.holdout_season": "2026", "evaluate.metrics_file": "metrics.json", "feature_candidates": "['men_women', 'd_AdjEM', 'd_AdjOE', 'd_AdjDE', 'd_AdjTempo', 'd_Rating', 'd_Elo', 'd_Quality', 'A_Seed', 'B_Seed', 'd_Seed', 'd_Form', 'd_MasseyRank', 'A_MasseyRank', 'B_MasseyRank', 'd_avg_PointDiff', 'd_avg_Score', 'd_eFGpct', 'd_TOpct', 'd_ORpct', 'd_FTrate', 'd_TSpct', 'd_opp_eFGpct', 'd_opp_TOpct', 'd_opp_ORpct', 'd_opp_FTrate', 'd_opp_TSpct', 'd_FG3pct', 'd_FG2pct', 'd_FTpct', 'd_opp_FG3pct', 'd_opp_FG2pct', 'd_opp_FTpct', 'd_3PArate', 'd_opp_3PArate', 'd_ASTrate', 'd_opp_ASTrate', 'd_Blkpct', 'd_Stlpct', 'd_NonStlTOpct', 'd_opp_NonStlTOpct', 'd_pct_pts_3', 'd_pct_pts_2', 'd_pct_pts_ft', 'd_opp_pct_pts_3', 'd_opp_pct_pts_2', 'd_opp_pct_pts_ft', 'd_quality_wtd_margin']", "num_rounds": "700", "num_features": "48", "num_seasons": "22", "xgb_objective": "reg:squarederror", "xgb_booster": "gbtree", "xgb_eta": "0.01", "xgb_subsample": "0.6", "xgb_colsample_bynode": "0.8", "xgb_num_parallel_tree": "2", "xgb_min_child_weight": "4", "xgb_max_depth": "4", "xgb_tree_method": "hist", "xgb_grow_policy": "lossguide", "xgb_max_bin": "32", "xgb_seed": "42"}, "top_features": null, "calibration": null, "lb_score": null, "champion": true}];
+    var METRIC = "loto_brier";
+    var PARAM_KEYS = [];
+    var HAS_LB = false;
+    (function () {
+      var champ = RESULTS.find(function (r) { return r.champion; });
+      var champVal = (champ && METRIC) ? ((champ.metrics || {})[METRIC]) : null;
+      if (champVal === undefined) { champVal = null; }
+      if (METRIC) {
+        var cvals = RESULTS.map(function (r) { return (r.metrics || {})[METRIC]; });
+        var hasVals = cvals.some(function (v) { return v !== undefined && v !== null; });
+        if (hasVals) {
+          new Chart(document.getElementById('chart').getContext('2d'), {
+            type: 'line',
+            data: {
+              labels: RESULTS.map(function (r) { return (r.sha || '').slice(0, 8); }),
+              datasets: [{
+                label: METRIC,
+                data: cvals,
+                borderColor: '#3b82f6',
+                backgroundColor: 'rgba(59,130,246,0.08)',
+                tension: 0.2,
+                spanGaps: true,
+                pointBackgroundColor: RESULTS.map(function (r) {
+                  return r.champion ? '#eab308' : '#3b82f6';
+                }),
+                pointRadius: 5
+              }]
+            },
+            options: {
+              responsive: true,
+              plugins: { legend: { display: true } },
+              scales: { y: { title: { display: true, text: METRIC } } }
+            }
+          });
+        } else {
+          document.getElementById('chart-wrap').style.display = 'none';
+        }
+      } else {
+        document.getElementById('chart-wrap').style.display = 'none';
+      }
+      var hdrs = ['#', 'SHA', 'Run ID', METRIC || 'Metric', 'Δ vs Champion'];
+      if (HAS_LB) { hdrs.push('LB Score'); }
+      PARAM_KEYS.forEach(function (k) { hdrs.push(k); });
+      hdrs.push('Started');
+      var htr = document.createElement('tr');
+      hdrs.forEach(function (h) {
+        var th = document.createElement('th');
+        th.textContent = h;
+        htr.appendChild(th);
+      });
+      document.getElementById('thead').appendChild(htr);
+      var tbody = document.getElementById('tbody');
+      RESULTS.forEach(function (run, i) {
+        var tr = document.createElement('tr');
+        if (run.champion) { tr.className = 'champion'; }
+        var mVal = METRIC ? (run.metrics || {})[METRIC] : null;
+        if (mVal === undefined) { mVal = null; }
+        var mStr = (mVal !== null) ? mVal.toFixed(4) : '—';
+        var deltaStr, deltaCls = '';
+        if (run.champion) {
+          deltaStr = '★';
+        } else if (champVal !== null && mVal !== null) {
+          var d = mVal - champVal;
+          deltaStr = (d >= 0 ? '+' : '') + d.toFixed(4);
+          deltaCls = d >= 0 ? 'dpos' : 'dneg';
+        } else {
+          deltaStr = '—';
+        }
+        [run.champion ? '[C]' : String(i + 1),
+         (run.sha || '').slice(0, 8),
+         (run.run_id || '').slice(0, 8),
+         mStr
+        ].forEach(function (v) {
+          var td = document.createElement('td');
+          td.textContent = v;
+          tr.appendChild(td);
+        });
+        var dtd = document.createElement('td');
+        dtd.textContent = deltaStr;
+        if (deltaCls) { dtd.className = deltaCls; }
+        tr.appendChild(dtd);
+        if (HAS_LB) {
+          var ltd = document.createElement('td');
+          var lb = run.lb_score;
+          ltd.textContent = (lb !== null && lb !== undefined) ? String(lb) : '—';
+          tr.appendChild(ltd);
+        }
+        PARAM_KEYS.forEach(function (k) {
+          var ptd = document.createElement('td');
+          var p = run.params;
+          ptd.textContent = (p && p[k] !== undefined) ? p[k] : '-';
+          tr.appendChild(ptd);
+        });
+        var std = document.createElement('td');
+        std.textContent = run.timestamp ? new Date(run.timestamp).toLocaleString() : '—';
+        tr.appendChild(std);
+        tbody.appendChild(tr);
+      });
+    }());
+
+    // DASH-007: submission history — lb_score (left) vs local primary metric (right).
+    // Activates when at least 2 results carry an lb_score. Diverging lines (local
+    // metric improving while LB flattens) signal overfitting the public test set.
+    (function () {
+      var withLb = RESULTS.filter(function (r) {
+        return r.lb_score !== null && r.lb_score !== undefined;
+      });
+      if (withLb.length < 2) { return; }
+      document.getElementById('lb-wrap').style.display = 'block';
+      var labels = withLb.map(function (r) {
+        return r.timestamp ? new Date(r.timestamp).toLocaleDateString() : (r.sha || '').slice(0, 8);
+      });
+      var datasets = [{
+        label: 'LB score',
+        data: withLb.map(function (r) { return r.lb_score; }),
+        borderColor: '#16a34a',
+        backgroundColor: 'rgba(22,163,74,0.08)',
+        yAxisID: 'yLb', tension: 0.2, spanGaps: true, pointRadius: 4
+      }];
+      if (METRIC) {
+        datasets.push({
+          label: METRIC + ' (local)',
+          data: withLb.map(function (r) {
+            var v = (r.metrics || {})[METRIC];
+            return (v === undefined) ? null : v;
+          }),
+          borderColor: '#3b82f6',
+          backgroundColor: 'rgba(59,130,246,0.08)',
+          yAxisID: 'yMetric', tension: 0.2, spanGaps: true, pointRadius: 4
+        });
+      }
+      new Chart(document.getElementById('lb-chart').getContext('2d'), {
+        type: 'line',
+        data: { labels: labels, datasets: datasets },
+        options: {
+          responsive: true,
+          plugins: { legend: { display: true } },
+          scales: {
+            yLb: { type: 'linear', position: 'left', title: { display: true, text: 'LB score' } },
+            yMetric: {
+              type: 'linear', position: 'right',
+              title: { display: true, text: METRIC || 'local metric' },
+              grid: { drawOnChartArea: false }
+            }
+          }
+        }
+      });
+    }());
+
+    // DASH-005: per-fold metric breakdown — grouped bar chart, one bar group per
+    // fold (the {METRIC}_{fold} keys emitted by loto_cv / time_series_cv), one bar
+    // per run. Activates when any per-fold key for the primary metric is present.
+    (function () {
+      if (!METRIC) { return; }
+      var prefix = METRIC + '_';
+      var foldSet = {};
+      RESULTS.forEach(function (r) {
+        Object.keys(r.metrics || {}).forEach(function (k) {
+          if (k.indexOf(prefix) === 0) {
+            var suffix = k.slice(prefix.length);
+            if (suffix !== 'mean' && suffix !== 'std') { foldSet[suffix] = true; }
+          }
+        });
+      });
+      var folds = Object.keys(foldSet).sort();
+      if (!folds.length) { return; }
+      document.getElementById('fold-wrap').style.display = 'block';
+
+      var runsWithFolds = RESULTS.filter(function (r) {
+        return folds.some(function (f) { return (r.metrics || {})[prefix + f] !== undefined; });
+      });
+      var palette = ['#3b82f6', '#16a34a', '#eab308', '#dc2626', '#8b5cf6', '#0891b2', '#db2777', '#65a30d'];
+      var datasets = runsWithFolds.map(function (r, i) {
+        return {
+          label: ((r.sha || '').slice(0, 7) || ('run ' + (i + 1))) + (r.champion ? ' [C]' : ''),
+          data: folds.map(function (f) {
+            var v = (r.metrics || {})[prefix + f];
+            return (v === undefined) ? null : v;
+          }),
+          backgroundColor: palette[i % palette.length]
+        };
+      });
+      new Chart(document.getElementById('fold-chart').getContext('2d'), {
+        type: 'bar',
+        data: { labels: folds, datasets: datasets },
+        options: {
+          responsive: true,
+          plugins: { legend: { display: true } },
+          scales: {
+            y: { title: { display: true, text: METRIC } },
+            x: { title: { display: true, text: 'fold / period' } }
+          }
+        }
+      });
+    }());
+
+    // DASH-004: feature importance heatmap. Rows = union of the top features across
+    // runs (max 20), columns = runs by date, cell shade = importance normalised within
+    // each run. Activates when any result includes a top_features list (LML-010).
+    (function () {
+      var N = 20;
+      var withFi = RESULTS.filter(function (r) {
+        return Array.isArray(r.top_features) && r.top_features.length;
+      });
+      if (!withFi.length) { return; }
+      document.getElementById('fi-wrap').style.display = 'block';
+
+      var best = {};
+      withFi.forEach(function (r) {
+        r.top_features.slice(0, N).forEach(function (f) {
+          if (best[f.name] === undefined || f.importance > best[f.name]) {
+            best[f.name] = f.importance;
+          }
+        });
+      });
+      var feats = Object.keys(best).sort(function (a, b) { return best[b] - best[a]; }).slice(0, N);
+
+      var head = '<tr><th>feature</th>';
+      withFi.forEach(function (r) {
+        head += '<th>' + ((r.sha || '').slice(0, 7) || '—') + '</th>';
+      });
+      head += '</tr>';
+
+      var body = '';
+      feats.forEach(function (name) {
+        body += '<tr><td>' + name + '</td>';
+        withFi.forEach(function (r) {
+          var imp = null;
+          var maxImp = 0;
+          r.top_features.forEach(function (f) {
+            if (f.importance > maxImp) { maxImp = f.importance; }
+            if (f.name === name) { imp = f.importance; }
+          });
+          if (imp === null) {
+            body += '<td class="fi-empty">·</td>';
+          } else {
+            var intensity = maxImp > 0 ? imp / maxImp : 0;
+            var alpha = (0.10 + 0.90 * intensity).toFixed(2);
+            body += '<td style="background: rgba(59,130,246,' + alpha + ')" title="' +
+              imp.toFixed(4) + '">' + imp.toFixed(3) + '</td>';
+          }
+        });
+        body += '</tr>';
+      });
+      document.getElementById('fi-heatmap').innerHTML =
+        '<table id="fi-table"><thead>' + head + '</thead><tbody>' + body + '</tbody></table>';
+    }());
+
+    // DASH-008: parameter parallel coordinates. One axis per numeric param, one
+    // polyline per run, coloured by the primary metric (greener = higher). Each
+    // axis is independently min-max normalised to [0, 1]; reveals which param
+    // combinations cluster around good outcomes. Activates with >=2 runs carrying
+    // params and >=2 numeric axes. MLflow params arrive as strings, so every
+    // candidate is parsed with parseFloat and non-numeric keys are dropped.
+    (function () {
+      var withParams = RESULTS.filter(function (r) {
+        return r.params && typeof r.params === 'object';
+      });
+      if (withParams.length < 2) { return; }
+
+      var numericByKey = {};
+      withParams.forEach(function (r) {
+        Object.keys(r.params).forEach(function (k) {
+          var v = parseFloat(r.params[k]);
+          if (!isNaN(v)) {
+            (numericByKey[k] = numericByKey[k] || []).push(v);
+          }
+        });
+      });
+      var axes = Object.keys(numericByKey).filter(function (k) {
+        return numericByKey[k].length >= 2;
+      }).sort();
+      if (axes.length < 2) { return; }
+
+      var bounds = {};
+      axes.forEach(function (k) {
+        var vals = numericByKey[k];
+        bounds[k] = { min: Math.min.apply(null, vals), max: Math.max.apply(null, vals) };
+      });
+      function norm(k, raw) {
+        var b = bounds[k];
+        if (b.max === b.min) { return 0.5; }  // constant axis → centre line
+        return (raw - b.min) / (b.max - b.min);
+      }
+
+      var mvals = withParams.map(function (r) {
+        return METRIC ? (r.metrics || {})[METRIC] : null;
+      }).filter(function (v) { return v !== undefined && v !== null; });
+      var mMin = mvals.length ? Math.min.apply(null, mvals) : 0;
+      var mMax = mvals.length ? Math.max.apply(null, mvals) : 1;
+      function metricColour(r) {
+        var v = METRIC ? (r.metrics || {})[METRIC] : null;
+        if (v === undefined || v === null || mMax === mMin) { return '#94a3b8'; }
+        var t = (v - mMin) / (mMax - mMin);  // 0 = lowest, 1 = highest
+        return 'hsl(' + Math.round(t * 120) + ', 70%, 45%)';  // red → green
+      }
+
+      document.getElementById('pcoord-wrap').style.display = 'block';
+      document.getElementById('pcoord-note').textContent =
+        'Axes independently normalised 0–1' + (METRIC ? '; greener = higher ' + METRIC : '') + '.';
+
+      var datasets = withParams.map(function (r) {
+        return {
+          label: (r.sha || '').slice(0, 7) + (r.champion ? ' [C]' : ''),
+          data: axes.map(function (k) {
+            var raw = parseFloat(r.params[k]);
+            return isNaN(raw) ? null : norm(k, raw);
+          }),
+          borderColor: metricColour(r),
+          backgroundColor: metricColour(r),
+          spanGaps: true,
+          tension: 0,
+          pointRadius: 3
+        };
+      });
+      new Chart(document.getElementById('pcoord-chart').getContext('2d'), {
+        type: 'line',
+        data: { labels: axes, datasets: datasets },
+        options: {
+          responsive: true,
+          plugins: { legend: { display: true } },
+          scales: {
+            y: { min: 0, max: 1, title: { display: true, text: 'normalised value' } },
+            x: { title: { display: true, text: 'parameter' } }
+          }
+        }
+      });
+    }());
+
+    // DASH-006: calibration (reliability) curve. Plots observed positive rate
+    // against mean predicted probability for the champion and most-recent runs,
+    // with a dashed diagonal as the perfectly-calibrated reference. Activates when
+    // any result carries a `calibration` list (DASH-006 / LML-010).
+    (function () {
+      function curveOf(r) {
+        return Array.isArray(r.calibration) && r.calibration.length ? r.calibration : null;
+      }
+      var withCal = RESULTS.filter(curveOf);
+      if (!withCal.length) { return; }
+      document.getElementById('cal-wrap').style.display = 'block';
+
+      var champ = withCal.find(function (r) { return r.champion; });
+      var recent = withCal[withCal.length - 1];
+      var picks = [];
+      if (champ) { picks.push({ run: champ, label: 'champion', colour: '#eab308' }); }
+      if (recent && recent !== champ) {
+        picks.push({ run: recent, label: 'most recent', colour: '#3b82f6' });
+      }
+      if (!picks.length) {
+        picks.push({ run: recent, label: 'latest', colour: '#3b82f6' });
+      }
+
+      var datasets = picks.map(function (p) {
+        return {
+          label: p.label + ' (' + (p.run.sha || '').slice(0, 7) + ')',
+          data: curveOf(p.run).map(function (b) {
+            return { x: b.bin_center, y: b.fraction_positive };
+          }),
+          borderColor: p.colour,
+          backgroundColor: p.colour,
+          tension: 0.2,
+          pointRadius: 4
+        };
+      });
+      datasets.push({
+        label: 'perfectly calibrated',
+        data: [{ x: 0, y: 0 }, { x: 1, y: 1 }],
+        borderColor: '#9ca3af',
+        borderDash: [6, 4],
+        pointRadius: 0,
+        fill: false
+      });
+      new Chart(document.getElementById('cal-chart').getContext('2d'), {
+        type: 'line',
+        data: { datasets: datasets },
+        options: {
+          responsive: true,
+          plugins: { legend: { display: true } },
+          scales: {
+            x: { type: 'linear', min: 0, max: 1, title: { display: true, text: 'mean predicted probability' } },
+            y: { min: 0, max: 1, title: { display: true, text: 'observed positive rate' } }
+          }
+        }
+      });
+    }());
+  </script>
+</body>
+</html>

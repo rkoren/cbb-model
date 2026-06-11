@@ -26,8 +26,10 @@ from sklearn.preprocessing import StandardScaler
 
 from kitchen import tracking
 from kitchen.experiment import ExperimentConfig, log_config
-from kitchen.submit import log_submission
+from kitchen.store import DataStore
+from kitchen.submit import check_feature_parity, log_submission
 
+from cbb.data import build_seed_lookup, build_symmetric_games as _build_sym
 from cbb.kenpom import KenPomClient
 from cbb.features import (
     compute_adj_efficiency,
@@ -56,6 +58,11 @@ load_dotenv()
 DATA_RAW = Path(os.environ.get("DATA_RAW_DIR", "data/raw"))
 DATA_PROC = Path(os.environ.get("DATA_PROC_DIR", "data/processed"))
 EXPERIMENT = os.environ.get("MLFLOW_EXPERIMENT", "cbb-tournament")
+
+# Shared DataStore instance (rooted at repo root) — used in all tasks that
+# read/write data/processed/.  Tasks that need raw data still read from DATA_RAW
+# directly so the DVC-managed path override via DATA_RAW_DIR is preserved.
+_store = DataStore(root=".")
 
 # ── Feature columns used in training (keep in sync with model artifacts) ──────
 Z_FEATURES = ["d_AdjEM", "d_Elo", "d_Quality", "d_Form"]
@@ -149,51 +156,13 @@ def load_kaggle_data(season: int | None = None) -> dict[str, pd.DataFrame]:
 def build_symmetric_games(data: dict[str, pd.DataFrame]) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Convert W/L game logs to symmetric T1/T2 format, OT-adjusted.
 
+    Delegates to ``cbb.data.build_symmetric_games`` — logic lives there so
+    both this Prefect flow and ``src/features/run.py`` share the same code.
+
     Returns (reg_sym, tourn_sym) — symmetric regular-season and tournament games.
     """
     log = get_run_logger()
-    FT_FACTOR = 0.475
-    BOX_COLS = ["Score", "FGM", "FGA", "FGM3", "FGA3", "FTM", "FTA", "OR", "DR", "Ast", "TO", "Stl", "Blk", "PF"]
-
-    def _normalize(df: pd.DataFrame, mw: int, is_tourn: bool = False) -> pd.DataFrame:
-        records = []
-        for _, row in df.iterrows():
-            adjot = (40 + 5 * row.get("NumOT", 0)) / 40
-            base = {"Season": row["Season"], "DayNum": row["DayNum"], "men_women": mw, "is_tourn": int(is_tourn)}
-            loc = row.get("WLoc", "N")
-
-            for t1_is_winner in [True, False]:
-                rec = dict(base)
-                if t1_is_winner:
-                    rec["T1_TeamID"] = row["WTeamID"]
-                    rec["T2_TeamID"] = row["LTeamID"]
-                    rec["Outcome"] = 1
-                    rec["T1_home"] = 1 if loc == "H" else (-1 if loc == "A" else 0)
-                    for c in BOX_COLS:
-                        rec[f"T1_{c}"] = row[f"W{c}"] / adjot
-                        rec[f"T2_{c}"] = row[f"L{c}"] / adjot
-                else:
-                    rec["T1_TeamID"] = row["LTeamID"]
-                    rec["T2_TeamID"] = row["WTeamID"]
-                    rec["Outcome"] = 0
-                    rec["T1_home"] = -1 if loc == "H" else (1 if loc == "A" else 0)
-                    for c in BOX_COLS:
-                        rec[f"T1_{c}"] = row[f"L{c}"] / adjot
-                        rec[f"T2_{c}"] = row[f"W{c}"] / adjot
-                rec["PointDiff"] = rec["T1_Score"] - rec["T2_Score"]
-                records.append(rec)
-        return pd.DataFrame(records)
-
-    parts_reg = [
-        _normalize(data["M_reg_raw"], mw=0),
-        _normalize(data["W_reg_raw"], mw=1),
-    ]
-    parts_tourn = [
-        _normalize(data["M_tourn_raw"], mw=0, is_tourn=True),
-        _normalize(data["W_tourn_raw"], mw=1, is_tourn=True),
-    ]
-    reg_sym = pd.concat(parts_reg, ignore_index=True)
-    tourn_sym = pd.concat(parts_tourn, ignore_index=True)
+    reg_sym, tourn_sym = _build_sym(data)
     log.info("reg_sym: %d rows, tourn_sym: %d rows", len(reg_sym), len(tourn_sym))
     return reg_sym, tourn_sym
 
@@ -209,14 +178,13 @@ def compute_all_features(
 
     adj_eff = compute_adj_efficiency(reg_sym)
     log.info("adj_eff: %d rows, mean iters %.1f", len(adj_eff), adj_eff["iters"].mean())
-    DATA_PROC.mkdir(parents=True, exist_ok=True)
 
     # Merge official KenPom efficiency for men's games where cached parquets exist.
     # Women's rows are always preserved from manual computation.
     seasons_in_data = sorted(reg_sym["Season"].unique())
     kenpom_merged_count = 0
     for s in seasons_in_data:
-        kenpom_path = DATA_PROC / f"kenpom_ratings_{s}.parquet"
+        kenpom_path = _store.processed_dir / f"kenpom_ratings_{s}.parquet"
         if kenpom_path.exists():
             try:
                 team_map = build_team_name_map(data["M_teams"], KenPomClient().teams(year=s))
@@ -228,38 +196,39 @@ def compute_all_features(
     if kenpom_merged_count:
         log.info("KenPom efficiency merged for %d/%d seasons", kenpom_merged_count, len(seasons_in_data))
     # Save post-KenPom so adj_eff.parquet reflects the final merged values
-    adj_eff.to_parquet(DATA_PROC / "adj_eff.parquet", index=False)
+    _store.save_parquet(adj_eff, "adj_eff.parquet")
 
     season_avgs = add_four_factors(compute_season_averages(reg_sym))
-    season_avgs.to_parquet(DATA_PROC / "season_avgs.parquet", index=False)
+    _store.save_parquet(season_avgs, "season_avgs.parquet")
 
     M_elo = compute_elo(data["M_reg_raw"], men_women_flag=0)
     W_elo = compute_elo(data["W_reg_raw"], men_women_flag=1)
     elo_df = pd.concat([M_elo, W_elo], ignore_index=True)
-    elo_df.to_parquet(DATA_PROC / "elo_df.parquet", index=False)
+    _store.save_parquet(elo_df, "elo_df.parquet")
 
     form_df = compute_recent_form(reg_sym)
-    form_df.to_parquet(DATA_PROC / "form_df.parquet", index=False)
+    _store.save_parquet(form_df, "form_df.parquet")
 
     quality_df = compute_glm_quality(reg_sym)
-    quality_df.to_parquet(DATA_PROC / "quality_df.parquet", index=False)
+    _store.save_parquet(quality_df, "quality_df.parquet")
 
     massey_lookup = compute_massey_ranks(data["massey"])
-    pd.DataFrame(
-        [(s, t, v) for (s, t), v in massey_lookup.items()],
-        columns=["Season", "TeamID", "MasseyRank"],
-    ).to_parquet(DATA_PROC / "massey_lookup.parquet", index=False)
+    _store.save_parquet(
+        pd.DataFrame(
+            [(s, t, v) for (s, t), v in massey_lookup.items()],
+            columns=["Season", "TeamID", "MasseyRank"],
+        ),
+        "massey_lookup.parquet",
+    )
 
     # Seed lookup: (Season, TeamID) → seed number
-    def _parse_seed(s):
-        digits = "".join(filter(str.isdigit, str(s)[1:3]))
-        return int(digits) if digits else None
-
-    seeds = pd.concat([data["M_seeds"], data["W_seeds"]], ignore_index=True)
-    seeds["SeedNum"] = seeds["Seed"].apply(_parse_seed)
-    seed_lookup = seeds.set_index(["Season", "TeamID"])["SeedNum"].to_dict()
-    seeds[["Season", "TeamID", "SeedNum"]].dropna().astype({"Season": int, "TeamID": int, "SeedNum": int}).to_parquet(
-        DATA_PROC / "seed_lookup.parquet", index=False
+    seed_lookup = build_seed_lookup(data["M_seeds"], data["W_seeds"])
+    _store.save_parquet(
+        pd.DataFrame(
+            [(s, t, v) for (s, t), v in seed_lookup.items()],
+            columns=["Season", "TeamID", "SeedNum"],
+        ).astype({"Season": int, "TeamID": int, "SeedNum": int}),
+        "seed_lookup.parquet",
     )
 
     matchups = build_matchup_dataset(
@@ -286,12 +255,13 @@ def compute_all_features(
     matchups["d_Rating"] = (matchups[z_cols] * opt_weights).sum(axis=1)
 
     log.info("Matchup dataset: %s", matchups.shape)
-    matchups.to_parquet(DATA_PROC / "matchups.parquet", index=False)
+    _store.save_parquet(matchups, "matchups.parquet")
 
     rating_meta = {"opt_weights": opt_weights.tolist(), "z_cols": z_cols}
-    with open(DATA_PROC / "rating_meta.json", "w") as f:
+    proc = _store.processed_dir
+    with open(proc / "rating_meta.json", "w") as f:
         json.dump(rating_meta, f)
-    with open(DATA_PROC / "scaler.pkl", "wb") as f:
+    with open(proc / "scaler.pkl", "wb") as f:
         pickle.dump(scaler, f)
 
     return matchups, rating_meta, {"scaler": scaler}
@@ -347,21 +317,27 @@ def run_production_training(
         loto.temp_params["T_M_close"],
     )
     # Save locally for submission generation (avoids MLflow round-trip)
-    DATA_PROC.mkdir(parents=True, exist_ok=True)
-    booster.save_model(str(DATA_PROC / "prod_booster.ubj"))
-    with open(DATA_PROC / "prod_calibrator.pkl", "wb") as f:
+    proc = _store.processed_dir
+    booster.save_model(str(proc / "prod_booster.ubj"))
+    with open(proc / "prod_calibrator.pkl", "wb") as f:
         pickle.dump(calibrator, f)
+    # Bundle into CBBModel and save as a single pickle for kitchen run evaluate
+    from cbb.train.model import CBBModel  # noqa: PLC0415
+    cbb_model = loto.to_model(booster, calibrator)
+    with open(proc / "cbb_model.pkl", "wb") as f:
+        pickle.dump(cbb_model, f)
     # Log model artifact back into the LOTO run so it's co-located with metrics
     if loto.loto_run_id:
         loto_meta = {"features": loto.features, "temp_params": loto.temp_params, "vegas_alpha": loto.vegas_alpha}
-        loto_meta_path = DATA_PROC / "loto_meta.json"
+        loto_meta_path = proc / "loto_meta.json"
         with open(loto_meta_path, "w") as f:
             json.dump(loto_meta, f)
         with mlflow.start_run(run_id=loto.loto_run_id):
+            mlflow.sklearn.log_model(cbb_model, "cbb_model")
             mlflow.sklearn.log_model(calibrator, "calibrator")
-            mlflow.log_artifact(str(DATA_PROC / "prod_booster.ubj"), "xgb_model")
-            mlflow.log_artifact(str(DATA_PROC / "rating_meta.json"), "run_meta")
-            mlflow.log_artifact(str(DATA_PROC / "scaler.pkl"), "run_meta")
+            mlflow.log_artifact(str(proc / "prod_booster.ubj"), "xgb_model")
+            mlflow.log_artifact(str(proc / "rating_meta.json"), "run_meta")
+            mlflow.log_artifact(str(proc / "scaler.pkl"), "run_meta")
             mlflow.log_artifact(str(loto_meta_path), "run_meta")
         log.info("Production artifacts logged to LOTO run %s", loto.loto_run_id)
     return booster, calibrator
@@ -400,18 +376,18 @@ def _run_submission(
     Returns:
         Submission DataFrame with ID and Pred columns.
     """
-    adj_eff = pd.read_parquet(DATA_PROC / "adj_eff.parquet")
-    season_avgs = pd.read_parquet(DATA_PROC / "season_avgs.parquet")
-    elo_df = pd.read_parquet(DATA_PROC / "elo_df.parquet")
-    quality_df = pd.read_parquet(DATA_PROC / "quality_df.parquet")
-    form_df = pd.read_parquet(DATA_PROC / "form_df.parquet")
+    adj_eff = _store.load_parquet("adj_eff.parquet")
+    season_avgs = _store.load_parquet("season_avgs.parquet")
+    elo_df = _store.load_parquet("elo_df.parquet")
+    quality_df = _store.load_parquet("quality_df.parquet")
+    form_df = _store.load_parquet("form_df.parquet")
     massey_lookup = (
-        pd.read_parquet(DATA_PROC / "massey_lookup.parquet")
+        _store.load_parquet("massey_lookup.parquet")
         .set_index(["Season", "TeamID"])["MasseyRank"]
         .to_dict()
     )
     seed_lookup = (
-        pd.read_parquet(DATA_PROC / "seed_lookup.parquet")
+        _store.load_parquet("seed_lookup.parquet")
         .set_index(["Season", "TeamID"])["SeedNum"]
         .to_dict()
     )
@@ -442,13 +418,20 @@ def _run_submission(
     if pre_predict_hook is not None:
         pred_df = pre_predict_hook(pred_df)
 
+    parity_errors = check_feature_parity(loto.features, pred_df)
+    if parity_errors:
+        raise RuntimeError(
+            "Feature parity check failed — submission features don't match training:\n"
+            + "\n".join(f"  {e}" for e in parity_errors)
+        )
+
     probs = predict_batch(
         pred_df, loto.features, booster, calibrator, loto.temp_params, loto.vegas_alpha,
     )
 
     ids = [f"{r.Season}_{r.A_TeamID}_{r.B_TeamID}" for r in pairs.itertuples()]
     submission = pd.DataFrame({"ID": ids, "Pred": probs})
-    out = DATA_PROC / f"submission_{season}.csv"
+    out = _store.processed_dir / f"submission_{season}.csv"
     submission.to_csv(out, index=False)
     return submission
 
@@ -476,7 +459,7 @@ def generate_submission(
     """
     log = get_run_logger()
     sub = _run_submission(season, data, reg_sym, booster, calibrator, loto, rating_meta, scaler)
-    sub_path = DATA_PROC / f"submission_{season}.csv"
+    sub_path = _store.processed_dir / f"submission_{season}.csv"
     sample_path = DATA_RAW / "SampleSubmissionStage1.csv"
 
     if sample_path.exists():

@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "College basketball tournament prediction pipeline"
 requires-python = ">=3.11"
 dependencies = [
+    "rkoren-kitchen",
     "httpx>=0.27",
     "pandas>=2.0",
     "numpy>=1.26",
