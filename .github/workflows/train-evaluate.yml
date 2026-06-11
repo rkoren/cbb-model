@@ -41,11 +41,11 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: |
-          pip install -e ../kitchen-platform/kitchen -e . --quiet
-          # kitchen-platform is a sibling repo; in CI, install from the
-          # published package instead:
-          # pip install rkoren-kitchen -e . --quiet
+        # kitchen-platform is a sibling repo only present in local dev, where you'd run:
+        #   pip install -e ../kitchen-platform/kitchen -e . --quiet
+        # In CI the sibling isn't checked out, so install the published package
+        # (matches the `promote` job below).
+        run: pip install rkoren-kitchen -e . --quiet
 
       - name: Pull data (DVC)
         run: dvc pull --quiet
