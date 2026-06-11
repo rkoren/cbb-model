@@ -190,7 +190,6 @@ def train_loto(
     matchups: pd.DataFrame,
     features: list[str],
     config: ModelConfig | None = None,
-    exp_config=None,
     mlflow_experiment: str | None = None,
 ) -> LoTOResult:
     """Leave-one-tournament-out training, calibration, temperature scaling, Vegas blend.
@@ -233,9 +232,6 @@ def train_loto(
                 "num_seasons": len(seasons),
                 **{f"xgb_{k}": v for k, v in config.xgb_params.items()},
             })
-            if exp_config is not None:
-                from kitchen.experiment import log_config
-                log_config(exp_config)
 
         for oof_season in seasons:
             train_mask = matchups["Season"] != oof_season

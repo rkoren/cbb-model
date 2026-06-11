@@ -4,6 +4,9 @@ data:
   source: local          # Kaggle CSVs are DVC-managed; run `dvc pull` to populate data/raw/
   path: data/raw
 
+check:
+  required_env: [KENPOM_API_KEY]
+
 mlflow:
   tracking_uri: sqlite:///mlruns.db
   model_artifact_path: cbb_model

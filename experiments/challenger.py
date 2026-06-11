@@ -28,7 +28,6 @@ from dotenv import load_dotenv
 from prefect import flow, task, get_run_logger
 
 from kitchen import tracking
-from kitchen.experiment import ExperimentConfig
 from kitchen.submit import log_submission
 
 # Re-use all shared tasks from the baseline experiment — no duplication
@@ -150,12 +149,6 @@ def challenger_pipeline(
     if num_rounds is not None:
         config.num_rounds = num_rounds
 
-    exp_config = ExperimentConfig(
-        name=f"cbb-challenger-{season}",
-        params={**config.xgb_params, "num_rounds": config.num_rounds},
-        description="Baseline + tournament path features + tempo×seed + net rebound edge",
-    )
-
     data = load_kaggle_data(season=season)
 
     try:
@@ -238,7 +231,7 @@ def challenger_pipeline(
                              ]]),
     )
 
-    loto = run_training(matchups, features, config, exp_config)
+    loto = run_training(matchups, features, config)
     log_eval_summary(loto, holdout_season)
     booster, calibrator = run_production_training(matchups, features, loto)
     if generate_sub:

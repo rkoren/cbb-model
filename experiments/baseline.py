@@ -25,7 +25,6 @@ from prefect import flow, task, get_run_logger
 from sklearn.preprocessing import StandardScaler
 
 from kitchen import tracking
-from kitchen.experiment import ExperimentConfig, log_config
 from kitchen.store import DataStore
 from kitchen.submit import check_feature_parity, log_submission
 
@@ -272,14 +271,12 @@ def run_training(
     matchups: pd.DataFrame,
     features: list[str],
     config: ModelConfig | None = None,
-    exp_config: ExperimentConfig | None = None,
 ) -> LoTOResult:
     """LOTO training + calibration + temperature scaling."""
     return train_loto(
         matchups,
         features,
         config=config,
-        exp_config=exp_config,
         mlflow_experiment=EXPERIMENT,
     )
 
@@ -526,11 +523,6 @@ def cbb_pipeline(
     if num_rounds is not None:
         config.num_rounds = num_rounds
 
-    exp_config = ExperimentConfig(
-        name=f"cbb-baseline-{season}",
-        params={**config.xgb_params, "num_rounds": config.num_rounds},
-    )
-
     data = load_kaggle_data(season=season)
 
     # Ingest KenPom ratings for all training seasons (skips already-cached seasons).
@@ -568,7 +560,7 @@ def cbb_pipeline(
     features = [f for f in feature_candidates if f in matchups.columns]
     matchups[features] = matchups[features].fillna(0)
 
-    loto = run_training(matchups, features, config, exp_config)
+    loto = run_training(matchups, features, config)
     log_eval_summary(loto, holdout_season)
     booster, calibrator = run_production_training(matchups, features, loto)
     if generate_sub:
