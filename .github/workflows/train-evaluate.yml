@@ -1,8 +1,8 @@
 name: Train & Evaluate
 
-# Runs on every push to main and on every PR.
-# Steps: features → train → evaluate → post metrics as PR comment (on PRs).
-# On push to main only: promotes the best run to the champion alias.
+# Run on every push to main and PR.
+# features → train → evaluate → post metrics as PR comment
+# On main only: promote the best run to the champion alias
 #
 # Required secrets:
 #   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY  — for `dvc pull` from S3
@@ -34,6 +34,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Checkout kitchen-platform
+        uses: actions/checkout@v4
+        with:
+          repository: rkoren/kitchen-platform
+          ref: main
+          path: kitchen-platform
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -41,11 +48,10 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        # kitchen-platform is a sibling repo only present in local dev, where you'd run:
-        #   pip install -e ../kitchen-platform/kitchen -e . --quiet
-        # In CI the sibling isn't checked out, so install the published package
-        # (matches the `promote` job below).
-        run: pip install rkoren-kitchen -e . --quiet
+        # kitchen-platform repo is checked out above into ./kitchen-platform and
+        # installed editable from its kitchen/ subdir, which satisfies cbb-model's
+        # rkoren-kitchen dependency. Locally you'd use the sibling path instead:
+        run: pip install -e ./kitchen-platform/kitchen -e . --quiet
 
       - name: Pull data (DVC)
         run: dvc pull --quiet
@@ -143,6 +149,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Checkout kitchen-platform
+        uses: actions/checkout@v4
+        with:
+          repository: rkoren/kitchen-platform
+          ref: main
+          path: kitchen-platform
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -150,7 +163,8 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: pip install rkoren-kitchen -e . --quiet
+        # See train-evaluate job: kitchen is built from source, not PyPI.
+        run: pip install -e ./kitchen-platform/kitchen -e . --quiet
 
       - name: Promote best run to champion
         run: |
