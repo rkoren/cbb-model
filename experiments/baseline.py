@@ -44,6 +44,7 @@ from cbb.features import (
 from cbb.train.model import (
     ModelConfig,
     LoTOResult,
+    log_sklearn_model,
     optimize_rating_weights,
     predict_batch,
     train_loto,
@@ -330,8 +331,8 @@ def run_production_training(
         with open(loto_meta_path, "w") as f:
             json.dump(loto_meta, f)
         with mlflow.start_run(run_id=loto.loto_run_id):
-            mlflow.sklearn.log_model(cbb_model, "cbb_model")
-            mlflow.sklearn.log_model(calibrator, "calibrator")
+            log_sklearn_model(cbb_model, "cbb_model")
+            log_sklearn_model(calibrator, "calibrator")
             mlflow.log_artifact(str(proc / "prod_booster.ubj"), "xgb_model")
             mlflow.log_artifact(str(proc / "rating_meta.json"), "run_meta")
             mlflow.log_artifact(str(proc / "scaler.pkl"), "run_meta")

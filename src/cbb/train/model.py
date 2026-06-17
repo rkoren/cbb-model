@@ -23,6 +23,33 @@ from sklearn.pipeline import make_pipeline
 
 log = logging.getLogger(__name__)
 
+
+# ── Model persistence ─────────────────────────────────────────────────────────
+# Recent MLflow versions serialize the sklearn flavor with skops by default, and skops
+# refuses to load any type it wasn't told to trust. The CBBModel bundle wraps two such
+# non-sklearn types — the wrapper class itself and the xgboost Booster — so they must be
+# declared trusted at log time, or `mlflow.sklearn.load_model` fails later in
+# evaluate/promote/serve with "references untrusted types".
+SKOPS_TRUSTED_TYPES: list[str] = ["cbb.train.model.CBBModel", "xgboost.core.Booster"]
+
+
+def log_sklearn_model(obj: object, name: str):
+    """Log an sklearn-flavor artifact with skops serialization + CBB's trusted types.
+
+    Single source of truth for the serialization choice so the train flow and the
+    experiment flows stay consistent and don't break when MLflow flips its default
+    sklearn format to skops. Returns the MLflow ``ModelInfo``.
+    """
+    import mlflow.sklearn  # noqa: PLC0415
+
+    return mlflow.sklearn.log_model(
+        obj,
+        name=name,
+        serialization_format="skops",
+        skops_trusted_types=SKOPS_TRUSTED_TYPES,
+    )
+
+
 # ── Defaults from hyperparameter sweeps in efficiency_approach.ipynb ──────────
 # depth=5 tested → +0.000498 worse. 700 rounds at eta=0.01 is the sweet spot.
 _DEFAULT_XGB_PARAMS: dict = {

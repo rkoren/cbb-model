@@ -25,6 +25,7 @@ from kitchen.tracking import Tracker
 from cbb.train.model import (
     CBBModel,
     ModelConfig,
+    log_sklearn_model,
     train_loto,
     train_production,
 )
@@ -159,8 +160,8 @@ def train(params: dict, store: DataStore, tracker: Tracker) -> CBBModel:
         json.dump(loto_meta, f)
 
     # ── Log production artifacts to the active (outer) run ────────────────────
-    mlflow.sklearn.log_model(model, "cbb_model")
-    mlflow.sklearn.log_model(calibrator, "calibrator")
+    log_sklearn_model(model, "cbb_model")
+    log_sklearn_model(calibrator, "calibrator")
     mlflow.log_artifact(str(proc / "prod_booster.ubj"), "xgb_model")
     mlflow.log_artifact(str(proc / "rating_meta.json"), "run_meta")
     mlflow.log_artifact(str(proc / "scaler.pkl"), "run_meta")
