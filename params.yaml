@@ -4,8 +4,12 @@ data:
   source: local          # Kaggle CSVs are DVC-managed; run `dvc pull` to populate data/raw/
   path: data/raw
 
-check:
-  required_env: [KENPOM_API_KEY]
+secrets:
+  KENPOM_API_KEY:                  # resolved via kitchen.secrets (env/.env → AWS SM)
+    aws_secret: kenpom_key         # Secrets Manager bundle (us-east-1)
+    key: KENPOM_API_KEY            # field within the JSON bundle
+    required: true
+  # Kaggle is covered by `kitchen check`'s dedicated credential check (kaggle.json).
 
 mlflow:
   tracking_uri: sqlite:///mlruns.db

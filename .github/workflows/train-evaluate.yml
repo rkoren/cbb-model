@@ -4,16 +4,24 @@ name: Train & Evaluate
 # features → train → evaluate → post metrics as PR comment
 # On main only: promote the best run to the champion alias
 #
-# Required secrets:
-#   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY  — for `dvc pull` from S3
-#   KAGGLE_USERNAME, KAGGLE_KEY               — for Kaggle data validation
-#   KENPOM_API_KEY                            — optional KenPom ratings enrichment
+# Authentication (no long-lived AWS keys):
+#   AWS_OIDC_ROLE_ARN (secret) — IAM role this workflow assumes via GitHub OIDC. Grant it
+#     S3 read (DVC remote + MLflow artifacts) and Secrets Manager read (`kitchen secrets
+#     iam-policy` generates the SM portion). CI stays red until this role exists.
+#   KENPOM_API_KEY — resolved from AWS Secrets Manager via the params.yaml `secrets:` manifest
+#     (`kitchen secrets export`), NOT a GitHub secret.
+#   KAGGLE_USERNAME, KAGGLE_KEY (secrets) — Kaggle data validation.
 
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
+
+permissions:
+  id-token: write       # assume the AWS role via OIDC
+  contents: read
+  pull-requests: write  # post the metrics PR comment
 
 jobs:
   train-evaluate:
@@ -24,11 +32,9 @@ jobs:
       MLFLOW_TRACKING_URI: sqlite:///mlruns.db
       MLFLOW_EXPERIMENT: cbb-tournament
       MLFLOW_ARTIFACT_BUCKET: reilly-cbb-model-data
+      AWS_REGION: us-east-1
       KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
       KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
-      KENPOM_API_KEY: ${{ secrets.KENPOM_API_KEY }}
-      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
     steps:
       - name: Checkout
@@ -48,16 +54,26 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        # kitchen-platform repo is checked out above into ./kitchen-platform and
-        # installed editable from its kitchen/ subdir, which satisfies cbb-model's
-        # rkoren-kitchen dependency. Locally you'd use the sibling path instead:
+        # kitchen-platform is checked out above into ./kitchen-platform and installed editable
+        # from its kitchen/ subdir (satisfies cbb-model's rkoren-kitchen dep). Locally you'd use
+        # the sibling path: pip install -e ../kitchen-platform/kitchen -e . --quiet
         run: pip install -e ./kitchen-platform/kitchen -e . --quiet
+
+      - name: Configure AWS credentials (OIDC)
+        # Assumes the IAM role via GitHub OIDC — no long-lived keys. Exports temporary AWS_*
+        # creds to the job env for DVC (S3), MLflow artifacts, and Secrets Manager.
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Export secrets to env
+        # Resolves the params.yaml `secrets:` manifest (KENPOM_API_KEY ← Secrets Manager) into
+        # $GITHUB_ENV for the steps below, masked. $GITHUB_ENV applies to subsequent steps.
+        run: kitchen secrets export
 
       - name: Pull data (DVC)
         run: dvc pull --quiet
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
       - name: Pre-flight check
         run: kitchen check
@@ -142,8 +158,7 @@ jobs:
     env:
       MLFLOW_TRACKING_URI: sqlite:///mlruns.db
       MLFLOW_EXPERIMENT: cbb-tournament
-      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION: us-east-1
 
     steps:
       - name: Checkout
@@ -165,6 +180,12 @@ jobs:
       - name: Install dependencies
         # See train-evaluate job: kitchen is built from source, not PyPI.
         run: pip install -e ./kitchen-platform/kitchen -e . --quiet
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          aws-region: us-east-1
 
       - name: Promote best run to champion
         run: |
