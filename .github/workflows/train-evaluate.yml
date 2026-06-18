@@ -1,8 +1,9 @@
 name: Train & Evaluate
 
 # Run on every push to main and PR.
-# features → train → evaluate → post metrics as PR comment
-# On main only: promote the best run to the champion alias
+# features → train (with --auto-promote) → evaluate → post metrics as PR comment
+# Promotion happens inside the train step; there is no separate promote job because
+# the tracking store is a per-job sqlite file (not shared across jobs/runners).
 #
 # Authentication (no long-lived AWS keys):
 #   AWS_OIDC_ROLE_ARN (secret) — IAM role this workflow assumes via GitHub OIDC. Grant it
@@ -148,49 +149,3 @@ jobs:
               repo: context.repo.repo,
               body
             });
-
-  # Promote the best run to champion alias on every push to main
-  promote:
-    needs: train-evaluate
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-
-    env:
-      MLFLOW_TRACKING_URI: sqlite:///mlruns.db
-      MLFLOW_EXPERIMENT: cbb-tournament
-      AWS_REGION: us-east-1
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Checkout kitchen-platform
-        uses: actions/checkout@v4
-        with:
-          repository: rkoren/kitchen-platform
-          ref: main
-          path: kitchen-platform
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: pip
-
-      - name: Install dependencies
-        # See train-evaluate job: kitchen is built from source, not PyPI.
-        run: pip install -e ./kitchen-platform/kitchen -e . --quiet
-
-      - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
-          aws-region: us-east-1
-
-      - name: Promote best run to champion
-        run: |
-          kitchen promote loto_brier \
-            --lower-is-better \
-            --model-name cbb-tournament-model \
-            --experiment cbb-tournament
