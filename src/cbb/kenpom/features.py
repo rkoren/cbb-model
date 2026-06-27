@@ -21,10 +21,10 @@ _KP_EFFICIENCY_COLS = ["AdjOE", "AdjDE", "AdjEM", "AdjTempo"]
 # Known KenPom name → Kaggle TeamName mismatches.
 _NAME_OVERRIDES: dict[str, str] = {
     "N.C. State": "NC State",
-    "Saint Mary's (CA)": "St Mary's CA",
+    "Saint Mary's (CA)": "St Mary's CA",  # older KenPom seasons
+    "Saint Mary's": "St Mary's CA",        # current KenPom name
     "Saint Joseph's": "St Joseph's PA",
     "Detroit Mercy": "Detroit Mercy",
-    "Penn": "Pennsylvania",
     "Loyola Chicago": "Loyola Chicago",
     "Louisiana": "Louisiana Lafayette",
     "UTSA": "UT San Antonio",
@@ -35,6 +35,16 @@ _NAME_OVERRIDES: dict[str, str] = {
     "St. Francis (PA)": "St Francis PA",
     "St. Thomas": "St Thomas MN",
     "UT Rio Grande Valley": "UT Rio Grande Vly",
+    # KP-003: abbreviation mismatches the 0.85 fuzzy just misses (surfaced building the
+    # 2026 holdout — all eight were dropped tournament teams).
+    "Kennesaw St.": "Kennesaw",
+    "LIU": "LIU Brooklyn",
+    "McNeese": "McNeese St",
+    "North Dakota St.": "N Dakota St",
+    "Saint Louis": "St Louis",
+    "Queens": "Queens NC",
+    # ("Penn" → Kaggle "Penn" now resolves by exact match; the old "Penn"→"Pennsylvania"
+    #  override pointed at a non-existent Kaggle team and is removed.)
 }
 
 _MATCH_THRESHOLD = 0.85

@@ -22,6 +22,7 @@ import mlflow.sklearn
 from kitchen.store import DataStore
 from kitchen.tracking import Tracker
 
+from cbb.holdout import HOLDOUT_PARQUET, score_holdout
 from cbb.train.model import (
     CBBModel,
     ModelConfig,
@@ -107,6 +108,8 @@ def train(params: dict, store: DataStore, tracker: Tracker) -> CBBModel:
     # Load processed matchup dataset
     proc = store.processed_dir
     matchups = store.load_parquet("matchups.parquet")
+    # The `kenpom_rich` variant adds the d_kp_* features to feature_candidates via the
+    # menu `variants:` overlay (CBB-016) — run it with `kitchen run train --variant kenpom_rich`.
     features = [f for f in feature_candidates if f in matchups.columns]
     matchups[features] = matchups[features].fillna(0)
     log.info("Training on %d matchups  %d features", len(matchups), len(features))
@@ -158,6 +161,25 @@ def train(params: dict, store: DataStore, tracker: Tracker) -> CBBModel:
     loto_meta_path = proc / "loto_meta.json"
     with open(loto_meta_path, "w", encoding="utf-8") as f:
         json.dump(loto_meta, f)
+
+    # ── 2026 holdout: trusted generalization metric, distinct from CV loto_brier ──
+    # Scores this ≤2025-trained model on the real 2026 tournament (built by the features
+    # stage when results exist). No-op until 2026 results are provided. Iterate on
+    # loto_brier; check holdout_brier sparingly (it overfits by selection if you peek often).
+    holdout_path = proc / HOLDOUT_PARQUET
+    if holdout_path.exists():
+        try:
+            hscore = score_holdout(model, store.load_parquet(HOLDOUT_PARQUET), features)
+            mlflow.log_metric("holdout_brier", hscore["holdout_brier"])
+            mlflow.log_metric("holdout_n_games", hscore["holdout_n_games"])
+            log.info(
+                "Holdout 2026 Brier: %.6f over %d games",
+                hscore["holdout_brier"], hscore["holdout_n_games"],
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Holdout scoring skipped: %s", exc)
+    else:
+        log.info("No %s — holdout_brier not logged (add 2026 results to enable)", HOLDOUT_PARQUET)
 
     # ── Log production artifacts to the active (outer) run ────────────────────
     log_sklearn_model(model, "cbb_model")

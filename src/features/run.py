@@ -40,6 +40,13 @@ from cbb.kenpom.features import (
     load_kenpom_efficiency,
     merge_kenpom_efficiency,
 )
+from cbb.kenpom.rich_features import build_kenpom_rich_features, join_kenpom_rich
+from cbb.holdout import (
+    HOLDOUT_DIR,
+    HOLDOUT_PARQUET,
+    build_holdout_matchups,
+    load_holdout_results,
+)
 from cbb.train.model import optimize_rating_weights
 
 log = logging.getLogger(__name__)
@@ -70,38 +77,75 @@ def _load_all_csvs(params: dict, store: DataStore) -> dict[str, pd.DataFrame]:
     return data
 
 
-def _try_merge_kenpom(
+# KenPom inputs are fetched from the API (not regenerable from data/raw), so they live in a
+# dedicated DVC-tracked dir — `dvc pull` restores them in CI. Populate with scripts/fetch_kenpom_*.
+KENPOM_DIR = Path("data/kenpom")
+
+
+def _apply_kenpom(
     adj_eff: pd.DataFrame,
     seasons: list[int],
     m_teams: pd.DataFrame,
-    processed_dir: Path,
-) -> pd.DataFrame:
-    """Best-effort: overlay official KenPom efficiency where cached parquets exist.
+    kenpom_dir: Path = KENPOM_DIR,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Best-effort KenPom integration: efficiency overlay + rich feature frame.
 
-    Women's rows are always preserved from manual computation. Skips any season
-    that lacks a cached kenpom_ratings_{season}.parquet file.
+    For each season with a cached ``kenpom_ratings_{season}.parquet`` the KenPom→Kaggle team
+    map is built once and reused for both:
+
+      1. the men's efficiency overlay (AdjOE/AdjDE/AdjEM/AdjTempo), and
+      2. the rich feature frame — ``kp_SOS/kp_Luck/kp_APL_Off/kp_APL_Def`` from the cached
+         ratings parquet, plus ``kp_AvgHgt/kp_HgtEff/kp_Exp/kp_Bench/kp_Continuity`` when a
+         cached ``kenpom_height_{season}.parquet`` exists (height is fetched/DVC-tracked
+         separately, so it is simply absent until then).
+
+    Women's rows are preserved from manual computation. Returns ``(adj_eff, kp_rich)`` where
+    ``kp_rich`` is keyed (Season, men_women, TeamID) with ``kp_*`` columns — an empty frame
+    when no KenPom data is available, which downstream joins handle as a no-op.
     """
+    kp_frames: list[pd.DataFrame] = []
     try:
         from cbb.kenpom import KenPomClient  # noqa: PLC0415
 
         client = KenPomClient()
         merged = 0
         for s in seasons:
-            kenpom_path = processed_dir / f"kenpom_ratings_{s}.parquet"
-            if not kenpom_path.exists():
+            ratings_path = kenpom_dir / f"kenpom_ratings_{s}.parquet"
+            if not ratings_path.exists():
                 continue
             try:
                 team_map = build_team_name_map(m_teams, client.teams(year=s))
-                kenpom_eff = load_kenpom_efficiency(s, kenpom_path, team_map)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("KenPom team map failed for season %d: %s", s, exc)
+                continue
+
+            try:
+                kenpom_eff = load_kenpom_efficiency(s, ratings_path, team_map)
                 adj_eff = merge_kenpom_efficiency(adj_eff, kenpom_eff)
                 merged += 1
             except Exception as exc:  # noqa: BLE001
-                log.warning("KenPom merge failed for season %d: %s", s, exc)
+                log.warning("KenPom efficiency merge failed for season %d: %s", s, exc)
+
+            try:
+                ratings_df = pd.read_parquet(ratings_path)
+                height_path = kenpom_dir / f"kenpom_height_{s}.parquet"
+                height_df = pd.read_parquet(height_path) if height_path.exists() else None
+                kp_frames.append(
+                    build_kenpom_rich_features(s, team_map, ratings_df, height_df)
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning("KenPom rich features failed for season %d: %s", s, exc)
         if merged:
             log.info("KenPom efficiency merged for %d/%d seasons", merged, len(seasons))
     except Exception as exc:  # noqa: BLE001
-        log.warning("KenPom merge skipped: %s", exc)
-    return adj_eff
+        log.warning("KenPom integration skipped: %s", exc)
+
+    kp_rich = (
+        pd.concat(kp_frames, ignore_index=True)
+        if kp_frames
+        else pd.DataFrame(columns=["Season", "men_women", "TeamID"])
+    )
+    return adj_eff, kp_rich
 
 
 def build(params: dict, store: DataStore) -> None:
@@ -110,7 +154,7 @@ def build(params: dict, store: DataStore) -> None:
     Reads
     -----
     ``data/raw/`` — nine Kaggle CSVs (must exist; run ``dvc pull`` first).
-    ``data/processed/kenpom_ratings_{season}.parquet`` — optional KenPom cache;
+    ``data/kenpom/kenpom_ratings_{season}.parquet`` — optional KenPom cache;
     run ``python -m cbb.kenpom.ingest`` or the Prefect ingest task to populate.
 
     Writes
@@ -149,7 +193,7 @@ def build(params: dict, store: DataStore) -> None:
     log.info("adj_eff: %d rows  mean iters %.1f", len(adj_eff), adj_eff["iters"].mean())
 
     seasons = sorted(reg_sym["Season"].unique().tolist())
-    adj_eff = _try_merge_kenpom(adj_eff, seasons, data["M_teams"], proc)
+    adj_eff, kp_rich = _apply_kenpom(adj_eff, seasons, data["M_teams"])
     store.save_parquet(adj_eff, "adj_eff.parquet")
 
     season_avgs = add_four_factors(compute_season_averages(reg_sym))
@@ -207,6 +251,16 @@ def build(params: dict, store: DataStore) -> None:
     opt_weights = optimize_rating_weights(matchups, z_cols)
     matchups["d_Rating"] = (matchups[z_cols] * opt_weights).sum(axis=1)
 
+    # ── KenPom rich features (additive) ────────────────────────────────────────
+    # Adds A_/B_/d_kp_* columns. Harmless to the baseline model, which selects only
+    # its `feature_candidates`; an experiment opts in by adding `d_kp_*` to that list.
+    matchups, kp_added = join_kenpom_rich(matchups, kp_rich)
+    if kp_added:
+        kp_diffs = sorted(c for c in kp_added if c.startswith("d_"))
+        log.info("KenPom rich features joined: %d cols (%s)", len(kp_added), ", ".join(kp_diffs))
+    else:
+        log.info("No KenPom rich features available — matchups has baseline columns only")
+
     rating_meta = {"opt_weights": opt_weights.tolist(), "z_cols": z_cols}
     with open(proc / "rating_meta.json", "w", encoding="utf-8") as f:
         json.dump(rating_meta, f)
@@ -221,3 +275,20 @@ def build(params: dict, store: DataStore) -> None:
         len(matchups),
         len(matchups.columns),
     )
+
+    # ── 2026 frozen holdout (gated: only once actual 2026 results are provided) ──
+    # Built from the same in-memory frames + post-processing → feature parity with training.
+    # Training never sees these games (they aren't in matchups.parquet), so it stays leak-free.
+    holdout_results = load_holdout_results()
+    if holdout_results is None:
+        log.info("No 2026 holdout results in %s/ — skipping holdout (drop them in to enable)", HOLDOUT_DIR)
+    else:
+        try:
+            holdout = build_holdout_matchups(
+                holdout_results, adj_eff, season_avgs, elo_df, quality_df, form_df,
+                seed_lookup, massey_lookup, reg_sym, scaler, opt_weights, z_features, kp_rich,
+            )
+            store.save_parquet(holdout, HOLDOUT_PARQUET)
+            log.info("Holdout built → %s  (%d games)", proc / HOLDOUT_PARQUET, len(holdout))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Holdout build skipped: %s", exc)

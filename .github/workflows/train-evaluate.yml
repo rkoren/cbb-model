@@ -9,7 +9,7 @@ name: Train & Evaluate
 #   AWS_OIDC_ROLE_ARN (secret) — IAM role this workflow assumes via GitHub OIDC. Grant it
 #     S3 read (DVC remote + MLflow artifacts) and Secrets Manager read (`kitchen secrets
 #     iam-policy` generates the SM portion). CI stays red until this role exists.
-#   KENPOM_API_KEY — resolved from AWS Secrets Manager via the params.yaml `secrets:` manifest
+#   KENPOM_API_KEY — resolved from AWS Secrets Manager via the menu.yaml `secrets:` manifest
 #     (`kitchen secrets export`), NOT a GitHub secret.
 #   KAGGLE_USERNAME, KAGGLE_KEY (secrets) — Kaggle data validation.
 
@@ -70,7 +70,7 @@ jobs:
           aws-region: us-east-1
 
       - name: Export secrets to env
-        # Resolves the params.yaml `secrets:` manifest (KENPOM_API_KEY ← Secrets Manager) into
+        # Resolves the menu.yaml `secrets:` manifest (KENPOM_API_KEY ← Secrets Manager) into
         # $GITHUB_ENV for the steps below, masked. $GITHUB_ENV applies to subsequent steps.
         run: kitchen secrets export
 
@@ -106,7 +106,7 @@ jobs:
           import json, sys
           with open("metrics.json") as f:
               metrics = json.load(f)
-          with open("params.yaml") as f:
+          with open("menu.yaml") as f:
               import yaml
               params = yaml.safe_load(f)
           thresholds = params.get("thresholds", {})

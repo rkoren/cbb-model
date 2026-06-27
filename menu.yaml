@@ -1,4 +1,54 @@
+# Unified platform manifest (menu.yaml) — the CBB tournament model as one file.
+#
+# Supersedes params.yaml: the same ML config, wrapped in the run `pipeline` and `recipes`
+# the kitchen platform reads. Local-first by default — SQLite tracking + S3 artifacts, no
+# AWS provisioning. Drive the whole loop with `kitchen menu run`; every `kitchen` command
+# also reads this file directly.
+#
+# Persistent-backend (AWS) path: uncomment the `mlflow-backend` rds recipe + the `provision`
+# pipeline step below and switch `mlflow.tracking_uri` to `{from_role: mlflow-backend}`.
+# NB: provisioning infra from this menu needs its OWN Terraform state (a `project` distinct
+# from `cbb-model`, which infra/cbb-model.yaml already owns) — see examples/persistent-backend.
+
+project: cbb-model
+region: us-east-1
 experiment: cbb-tournament
+
+pipeline: [train, evaluate]
+
+recipes:
+  # --- stages (project code; train runs features internally) ---
+  features:
+    kind: stage
+    source: src/features/run.py
+  train:
+    kind: stage
+    source: src/train/run.py
+    args: ["--auto-promote"]      # loto_brier is lower-is-better; auto-detected from thresholds
+  evaluate:
+    kind: stage
+    source: src/evaluate/run.py
+
+  # --- persistent MLflow backend (AWS) — uncomment + add `provision` to the pipeline to use ---
+  # mlflow-sg:
+  #   kind: security_group
+  #   ingress:
+  #     - { port: 5432, cidr_blocks: ["<your-ip>/32"], description: PostgreSQL }
+  # mlflow-backend:
+  #   kind: rds
+  #   role: mlflow-backend          # mlflow.tracking_uri: {from_role: mlflow-backend}
+  #   instance_class: db.t4g.micro
+  #   db_name: mlflow
+  #   username: mlflow
+  #   publicly_accessible: true
+  #   security_groups: [mlflow-sg]
+
+mlflow:
+  tracking_uri: sqlite:///mlruns.db   # local store; champions persist on disk across runs
+  model_artifact_path: cbb_model
+  artifact_bucket: reilly-cbb-model-data
+
+# --- ML config (carried verbatim from params.yaml) ---
 
 data:
   source: local          # Kaggle CSVs are DVC-managed; run `dvc pull` to populate data/raw/
@@ -10,11 +60,6 @@ secrets:
     key: KENPOM_API_KEY            # field within the JSON bundle
     required: true
   # Kaggle is covered by `kitchen check`'s dedicated credential check (kaggle.json).
-
-mlflow:
-  tracking_uri: sqlite:///mlruns.db
-  model_artifact_path: cbb_model
-  artifact_bucket: reilly-cbb-model-data
 
 monitor:
   reference_file: reference.parquet   # seasons <= 2023 (training distribution)
@@ -69,6 +114,17 @@ model:
 evaluate:
   holdout_season: 2026
   metrics_file: metrics.json
+
+# Experiment variants — multi-field overlays applied with `kitchen run train --variant <name>`
+# (tagged as model_variant so leaderboard/diff group them). The kenpom_rich variant adds the
+# KenPom rich differentials that `kitchen run features` joins into matchups.
+variants:
+  kenpom_rich:
+    model:
+      variant: kenpom_rich     # so the run's model_variant tag matches (leaderboard/diff)
+    feature_candidates:
+      add: [d_kp_APL_Def, d_kp_APL_Off, d_kp_Luck, d_kp_SOS,
+            d_kp_AvgHgt, d_kp_HgtEff, d_kp_Exp, d_kp_Bench, d_kp_Continuity]
 
 # Feature columns sent to XGBoost (filtered to those present in matchup DataFrame)
 feature_candidates:
