@@ -35,6 +35,7 @@ from cbb.features import (
     compute_recent_form,
     compute_season_averages,
 )
+from cbb.features.reg_games import build_reg_games
 from cbb.kenpom.features import (
     build_team_name_map,
     load_kenpom_efficiency,
@@ -275,6 +276,22 @@ def build(params: dict, store: DataStore) -> None:
         len(matchups),
         len(matchups.columns),
     )
+
+    # ── Regular-season game-level dataset (GM-001, M3 "handicap any game") ───────
+    # A *parallel* dataset to matchups.parquet: one row per reg-season game (symmetric A/B),
+    # leak-free by construction (pre-game Elo + venue + prior-season priors — no full-season
+    # leakage). Best-effort so a failure here never blocks the Kaggle features build. Season
+    # 2026 is left in the frame but excluded from training as the trusted reg-season holdout.
+    try:
+        reg_games = build_reg_games(data, adj_eff)
+        store.save_parquet(reg_games, "reg_games.parquet")
+        log.info(
+            "Reg-season game dataset → %s  (%d rows, %d cols, seasons %d-%d)",
+            proc / "reg_games.parquet", len(reg_games), len(reg_games.columns),
+            int(reg_games["Season"].min()), int(reg_games["Season"].max()),
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Reg-season game dataset skipped: %s", exc)
 
     # ── 2026 frozen holdout (gated: only once actual 2026 results are provided) ──
     # Built from the same in-memory frames + post-processing → feature parity with training.

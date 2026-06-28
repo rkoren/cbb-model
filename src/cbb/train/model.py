@@ -16,10 +16,8 @@ import numpy as np
 import pandas as pd
 import xgboost as xgb
 from scipy.optimize import minimize, minimize_scalar
-from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import brier_score_loss
-from sklearn.pipeline import make_pipeline
 
 log = logging.getLogger(__name__)
 
@@ -103,11 +101,13 @@ class CBBModel:
     See ``predict_batch()`` in this module for the full docstring.
     """
 
-    booster: xgb.Booster
+    booster: xgb.Booster         # margin head — regresses PointDiff (ScoreA - ScoreB)
     calibrator: object           # sklearn TF-IDF → LogisticRegression pipeline
     temp_params: dict            # T_M_close, T_M_blowout, T_W_close, T_W_blowout
     vegas_alpha: float           # 0 = pure Vegas, 1 = pure model
     features: list[str]
+    total_booster: "xgb.Booster | None" = None  # total head — regresses Total (SC-001); None on older artifacts
+    total_features: "list[str] | None" = None    # the total head's (sum) feature list; falls back to `features`
     men_blowout_gap: int = 10
     women_blowout_gap: int = 8
 
@@ -157,6 +157,29 @@ class CBBModel:
             vegas_alpha=self.vegas_alpha,
         )
 
+    def predict_scores(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Predict margin, total, and both team scores for a batch of matchups (SC-001).
+
+        ``margin`` = ScoreA − ScoreB is the main booster's regression target (PointDiff);
+        ``total`` = ScoreA + ScoreB is the total head. Returns a frame indexed like ``df``
+        with ``pred_margin, pred_total, pred_ScoreA, pred_ScoreB``. Requires a fitted
+        ``total_booster`` (retrain with a ``Total`` target).
+        """
+        if self.total_booster is None:
+            raise ValueError("predict_scores needs a total_booster — retrain with a Total target")
+        total_feats = self.total_features or self.features
+        margin = self.booster.predict(xgb.DMatrix(df[self.features].fillna(0).to_numpy()))
+        total = self.total_booster.predict(xgb.DMatrix(df[total_feats].fillna(0).to_numpy()))
+        return pd.DataFrame(
+            {
+                "pred_margin": margin,
+                "pred_total": total,
+                "pred_ScoreA": (total + margin) / 2.0,
+                "pred_ScoreB": (total - margin) / 2.0,
+            },
+            index=df.index,
+        )
+
 
 @dataclass
 class LoTOResult:
@@ -170,7 +193,13 @@ class LoTOResult:
     features: list[str]
     loto_run_id: str | None = None  # MLflow run ID; used by flow to log production model to same run
 
-    def to_model(self, booster: xgb.Booster, calibrator: object) -> CBBModel:
+    def to_model(
+        self,
+        booster: xgb.Booster,
+        calibrator: object,
+        total_booster: "xgb.Booster | None" = None,
+        total_features: "list[str] | None" = None,
+    ) -> CBBModel:
         """Wrap the production booster + calibrator into a CBBModel artifact.
 
         Uses the temp_params, vegas_alpha, and feature list already stored in
@@ -178,15 +207,18 @@ class LoTOResult:
         reuse for the production (all-seasons) model without leakage.
 
         Args:
-            booster: Production XGBoost booster (trained on all seasons).
+            booster: Production XGBoost margin booster (trained on all seasons).
             calibrator: Production logistic calibrator (trained on all seasons).
+            total_booster: Production total-points head (SC-001), or None.
 
         Returns:
-            CBBModel ready for ``predict_batch()`` and MLflow artifact logging.
+            CBBModel ready for ``predict_batch()``/``predict_scores()`` and MLflow logging.
         """
         return CBBModel(
             booster=booster,
             calibrator=calibrator,
+            total_booster=total_booster,
+            total_features=total_features,
             temp_params=self.temp_params,
             vegas_alpha=self.vegas_alpha,
             features=self.features,
@@ -195,13 +227,6 @@ class LoTOResult:
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _make_leaf_strings(leaf_mat: np.ndarray) -> list[str]:
-    return [
-        " ".join(f"{j}_{int(leaf_mat[i, j])}" for j in range(leaf_mat.shape[1]))
-        for i in range(leaf_mat.shape[0])
-    ]
-
-
 def _apply_temperature(probs: np.ndarray, T: float) -> np.ndarray:
     p = np.clip(probs, 1e-7, 1 - 1e-7)
     return 1.0 / (1.0 + np.exp(-np.log(p / (1 - p)) / T))
@@ -209,6 +234,23 @@ def _apply_temperature(probs: np.ndarray, T: float) -> np.ndarray:
 
 def _brier(targets, probs, weights=None):
     return brier_score_loss(targets, probs, sample_weight=weights)
+
+
+def _fit_margin_calibrator(margin: np.ndarray, outcome: np.ndarray, C: float = 1.0):
+    """Calibrate predicted margin → P(A wins) with a 1-feature logistic (SC-002).
+
+    Replaces the leaf-index (TF-IDF) calibration: collapsing to the scalar predicted margin
+    is both simpler and better-calibrated (LOTO Brier 0.1671 vs 0.1711, both temperature-
+    scaled — the leaf structure overfits; total/tempo-scaled variance added nothing).
+    """
+    cal = LogisticRegression(C=C, max_iter=1000)
+    cal.fit(np.asarray(margin).reshape(-1, 1), outcome)
+    return cal
+
+
+def _margin_to_prob(calibrator, margin: np.ndarray) -> np.ndarray:
+    """P(A wins) from predicted margins via a margin calibrator (SC-002)."""
+    return calibrator.predict_proba(np.asarray(margin).reshape(-1, 1))[:, 1]
 
 
 # ── LOTO training ─────────────────────────────────────────────────────────────
@@ -281,17 +323,10 @@ def train_loto(
             )
             xgb_models[oof_season] = booster
 
-            # Leaf calibration
-            dtr_leaf = xgb.DMatrix(x_tr)
-            leaf_tr = _make_leaf_strings(booster.predict(dtr_leaf, pred_leaf=True))
-            leaf_va = _make_leaf_strings(booster.predict(dval, pred_leaf=True))
-
-            calibrator = make_pipeline(
-                TfidfVectorizer(),
-                LogisticRegression(solver="liblinear", C=config.logistic_C, max_iter=300, random_state=0),
-            )
-            calibrator.fit(leaf_tr, y_tr_outcome)
-            raw = calibrator.predict_proba(leaf_va)[:, 1]
+            # Margin calibration (SC-002): P(A wins) from the predicted margin — beats the
+            # leaf-index calibration on Brier (LOTO 0.1671 vs 0.1711, both temp-scaled).
+            calibrator = _fit_margin_calibrator(booster.predict(dtrain), y_tr_outcome, config.logistic_C)
+            raw = _margin_to_prob(calibrator, booster.predict(dval))
 
             calibrators[oof_season] = calibrator
             val_idx = matchups[val_mask].index
@@ -411,7 +446,8 @@ def train_production(
     features: list[str],
     temp_params: dict,
     config: ModelConfig | None = None,
-) -> tuple[xgb.Booster, object]:
+    total_features: list[str] | None = None,
+) -> tuple[xgb.Booster, object, "xgb.Booster | None"]:
     """Train a single model on all seasons for deployment.
 
     Uses temperature params from the LOTO run — they were estimated on held-out
@@ -425,7 +461,8 @@ def train_production(
         config: Hyperparameter config.
 
     Returns:
-        (xgb_booster, calibrator) ready for prediction.
+        (xgb_booster, calibrator, total_booster) ready for prediction. ``total_booster`` is
+        the total-points head (SC-001), or ``None`` when the matchups carry no ``Total`` target.
     """
     config = config or ModelConfig()
 
@@ -437,14 +474,23 @@ def train_production(
     dtrain = xgb.DMatrix(x, label=y_margin, weight=sw)
     booster = xgb.train(config.xgb_params, dtrain, num_boost_round=config.num_rounds, verbose_eval=False)
 
-    leaf_strings = _make_leaf_strings(booster.predict(dtrain, pred_leaf=True))
-    calibrator = make_pipeline(
-        TfidfVectorizer(),
-        LogisticRegression(solver="liblinear", C=config.logistic_C, max_iter=300, random_state=0),
-    )
-    calibrator.fit(leaf_strings, y_outcome)
+    # Margin calibration (SC-002): win prob from the predicted margin.
+    calibrator = _fit_margin_calibrator(booster.predict(dtrain), y_outcome, config.logistic_C)
 
-    return booster, calibrator
+    # Total head (SC-001): trains on its own sum (level) features — combined pace/efficiency
+    # predicts the points total, which the margin head's differentials don't capture.
+    total_booster = None
+    if total_features and "Total" in matchups.columns:
+        tf = [f for f in total_features if f in matchups.columns]
+        if tf:
+            dtotal = xgb.DMatrix(
+                matchups[tf].fillna(0).to_numpy(), label=matchups["Total"].values, weight=sw
+            )
+            total_booster = xgb.train(
+                config.xgb_params, dtotal, num_boost_round=config.num_rounds, verbose_eval=False
+            )
+
+    return booster, calibrator, total_booster
 
 
 # ── Inference ─────────────────────────────────────────────────────────────────
@@ -475,8 +521,7 @@ def predict(
         Calibrated win probability for team A.
     """
     dm = xgb.DMatrix(feature_row.values)
-    leaf_str = _make_leaf_strings(booster.predict(dm, pred_leaf=True))
-    raw_prob = float(calibrator.predict_proba(leaf_str)[:, 1][0])
+    raw_prob = float(_margin_to_prob(calibrator, booster.predict(dm))[0])
 
     if men_women == 0:
         T = temp_params["T_M_blowout"] if (seed_gap or 0) > 10 else temp_params["T_M_close"]
@@ -521,8 +566,7 @@ def predict_batch(
     """
     x = pred_df[features].fillna(0).values
     dm = xgb.DMatrix(x)
-    leaf_mat = booster.predict(dm, pred_leaf=True)
-    raw_probs = calibrator.predict_proba(_make_leaf_strings(leaf_mat))[:, 1]
+    raw_probs = _margin_to_prob(calibrator, booster.predict(dm))
 
     mw = pred_df["men_women"].values
     seed_gap = (pred_df["A_Seed"] - pred_df["B_Seed"]).abs().fillna(0).values

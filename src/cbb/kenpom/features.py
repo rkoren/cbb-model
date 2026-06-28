@@ -86,14 +86,15 @@ def build_team_name_map(
         else:
             unmatched.append(kp_name)
 
+    # Count at INFO (this runs once per season — the full list every time is log spam);
+    # the unmatched names go to DEBUG for when you actually need to extend the overrides.
+    log.info(
+        "KenPom team name map: %d matched, %d unmatched (manual-efficiency fallback)",
+        len(result),
+        len(unmatched),
+    )
     if unmatched:
-        log.warning(
-            "KenPom teams with no Kaggle match (%d): %s",
-            len(unmatched),
-            ", ".join(sorted(unmatched)),
-        )
-
-    log.info("Team name map built: %d matched, %d unmatched", len(result), len(unmatched))
+        log.debug("Unmatched KenPom teams (%d): %s", len(unmatched), ", ".join(sorted(unmatched)))
     return result
 
 

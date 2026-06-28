@@ -92,6 +92,49 @@ def test_score_holdout_fills_missing_features():
     assert out["holdout_n_games"] == 1
 
 
+def test_score_holdout_always_reports_ece():
+    holdout = pd.DataFrame({"Outcome": [1, 0], "d_AdjEM": [5.0, -3.0]})
+    assert "holdout_ece" in score_holdout(_StubModel(0.6), holdout, ["d_AdjEM"])
+
+
+# ── SC-003: actual scores → margin/total MAE ───────────────────────────────────
+
+def test_pairs_attach_actual_scores():
+    res = pd.DataFrame({
+        "Season": [2026, 2026], "WTeamID": [1101, 1300], "LTeamID": [1205, 1200],
+        "WScore": [80, 78], "LScore": [72, 70],
+    })
+    pairs = results_to_pairs(res)
+    # game1 A=1101=W: Margin 80-72=8; game2 A=1200=L (W=1300): A=70, B=78 → -8
+    assert list(pairs["Margin"]) == [8.0, -8.0]
+    assert list(pairs["Total"]) == [152.0, 148.0]
+
+
+def test_pairs_no_scores_no_margin_columns():
+    pairs = results_to_pairs(pd.DataFrame({"Season": [2026], "WTeamID": [1101], "LTeamID": [1205]}))
+    assert "Margin" not in pairs.columns and "Total" not in pairs.columns
+
+
+class _ScoreStub(_StubModel):
+    """A model with a total head + fixed score predictions."""
+    total_booster = "present"
+    def predict_scores(self, df):
+        return pd.DataFrame({"pred_margin": [5.0] * len(df), "pred_total": [140.0] * len(df)}, index=df.index)
+
+
+def test_score_holdout_margin_total_mae_with_scores():
+    holdout = pd.DataFrame({"Outcome": [1, 0], "d_AdjEM": [5.0, -3.0], "Margin": [8.0, -2.0], "Total": [150.0, 130.0]})
+    out = score_holdout(_ScoreStub(0.6), holdout, ["d_AdjEM"])
+    assert out["holdout_margin_mae"] == pytest.approx(5.0)   # |5-8|,|5-(-2)| → mean 5
+    assert out["holdout_total_mae"] == pytest.approx(10.0)   # |140-150|,|140-130| → mean 10
+    assert out["holdout_scored_games"] == 2
+
+
+def test_score_holdout_skips_mae_without_scores():
+    holdout = pd.DataFrame({"Outcome": [1], "d_AdjEM": [5.0]})
+    assert "holdout_margin_mae" not in score_holdout(_ScoreStub(0.6), holdout, ["d_AdjEM"])
+
+
 # ── finalize_template ──────────────────────────────────────────────────────────
 
 def test_finalize_template_converts_winners(tmp_path):

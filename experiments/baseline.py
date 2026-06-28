@@ -307,7 +307,7 @@ def run_production_training(
 ) -> tuple:
     """Train production model on all seasons, save locally, log to LOTO run."""
     import mlflow.sklearn
-    booster, calibrator = train_production(matchups, features, loto.temp_params)
+    booster, calibrator, total_booster = train_production(matchups, features, loto.temp_params)
     log = get_run_logger()
     log.info(
         "Production model trained. Brier LOTO=%.6f  T_M_close=%.3f",
@@ -321,7 +321,7 @@ def run_production_training(
         pickle.dump(calibrator, f)
     # Bundle into CBBModel and save as a single pickle for kitchen run evaluate
     from cbb.train.model import CBBModel  # noqa: PLC0415
-    cbb_model = loto.to_model(booster, calibrator)
+    cbb_model = loto.to_model(booster, calibrator, total_booster)
     with open(proc / "cbb_model.pkl", "wb") as f:
         pickle.dump(cbb_model, f)
     # Log model artifact back into the LOTO run so it's co-located with metrics

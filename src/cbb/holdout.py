@@ -18,9 +18,10 @@ Data contract
 
     Season,WTeamID,LTeamID[,WScore,LScore,DayNum]
 
-Men's TeamID < 2000, Women's >= 3000 (Kaggle convention); `men_women` is inferred. Scores are
-optional — only win/loss is needed for Brier. Absent file → the holdout is skipped (no-op), so
-the pipeline runs unchanged until you drop the results in.
+Men's TeamID < 2000, Women's >= 3000 (Kaggle convention); `men_women` is inferred. `WScore`/
+`LScore` are optional — win/loss alone gives `holdout_brier`/`holdout_ece`; adding the scores
+also yields `holdout_margin_mae`/`holdout_total_mae` (SC-003). Absent file → the holdout is
+skipped (no-op), so the pipeline runs unchanged until you drop the results in.
 """
 
 from __future__ import annotations
@@ -104,21 +105,28 @@ def results_to_pairs(results: pd.DataFrame) -> pd.DataFrame:
 
     Each game becomes one row with ``A_TeamID < B_TeamID`` (Kaggle ID order) and
     ``Outcome = 1`` iff the lower-ID team won — the same orientation as the training matchups
-    and the Kaggle submission format. ``men_women`` is inferred from the team IDs.
+    and the Kaggle submission format. ``men_women`` is inferred from the team IDs. When the
+    results carry ``WScore``/``LScore`` (optional), the realized ``Margin`` (ScoreA − ScoreB,
+    oriented to A) and ``Total`` are attached too — enabling holdout ``margin_MAE``/``total_MAE``.
     """
+    has_scores = "WScore" in results.columns and "LScore" in results.columns
     rows = []
     for r in results.itertuples(index=False):
         w, l = int(r.WTeamID), int(r.LTeamID)
         a, b = (w, l) if w < l else (l, w)
-        rows.append(
-            {
-                "Season": int(r.Season),
-                "men_women": _infer_men_women(a),
-                "A_TeamID": a,
-                "B_TeamID": b,
-                "Outcome": 1 if a == w else 0,
-            }
-        )
+        rec = {
+            "Season": int(r.Season),
+            "men_women": _infer_men_women(a),
+            "A_TeamID": a,
+            "B_TeamID": b,
+            "Outcome": 1 if a == w else 0,
+        }
+        if has_scores and pd.notna(r.WScore) and pd.notna(r.LScore):
+            ws, ls = float(r.WScore), float(r.LScore)
+            sa, sb = (ws, ls) if a == w else (ls, ws)  # orient scores to A
+            rec["Margin"] = sa - sb
+            rec["Total"] = ws + ls
+        rows.append(rec)
     return pd.DataFrame(rows)
 
 
@@ -165,23 +173,39 @@ def build_holdout_matchups(
     # KenPom rich differentials (no-op if kp_rich is empty)
     pred, _ = join_kenpom_rich(pred, kp_rich)
 
+    merge_cols = ["Season", "men_women", "A_TeamID", "B_TeamID", "Outcome"]
+    merge_cols += [c for c in ("Margin", "Total") if c in pairs.columns]  # actual scores, if provided
     pred = pred.merge(
-        pairs[["Season", "men_women", "A_TeamID", "B_TeamID", "Outcome"]],
-        on=["Season", "men_women", "A_TeamID", "B_TeamID"],
-        how="left",
+        pairs[merge_cols], on=["Season", "men_women", "A_TeamID", "B_TeamID"], how="left"
     )
     log.info("Holdout matchups built: %d games (%d cols)", len(pred), len(pred.columns))
     return pred
 
 
+def _expected_calibration_error(y: np.ndarray, p: np.ndarray, n_bins: int = 10) -> float:
+    """Expected calibration error: weighted mean |confidence − accuracy| over equal-width bins."""
+    edges = np.linspace(0.0, 1.0, n_bins + 1)
+    idx = np.clip(np.digitize(p, edges) - 1, 0, n_bins - 1)
+    ece = 0.0
+    for b in range(n_bins):
+        mask = idx == b
+        if mask.any():
+            ece += (mask.sum() / len(p)) * abs(p[mask].mean() - y[mask].mean())
+    return float(ece)
+
+
 def score_holdout(
     model, holdout: pd.DataFrame, features: list[str]
 ) -> dict[str, float]:
-    """Score a trained model on the holdout matchups → ``{holdout_brier, holdout_n_games}``.
+    """Score a trained model on the holdout → win-prob + (when scores exist) score-accuracy.
 
-    ``model`` must expose ``predict_batch(df)`` (a ``CBBModel``). Any feature the model expects
-    but the holdout lacks is a parity break that would silently bias a *trusted* metric, so it is
-    logged as a WARNING (not swallowed) before being zero-filled to avoid a hard crash.
+    Always returns ``holdout_brier``, ``holdout_n_games``, and ``holdout_ece`` (calibration of
+    the win prob). When the model has a total head (SC-001) **and** the holdout carries actual
+    ``Margin``/``Total`` (i.e. the results CSV had ``WScore``/``LScore``), also returns
+    ``holdout_margin_mae``/``holdout_total_mae``/``holdout_scored_games`` (SC-003).
+
+    Any feature the model expects but the holdout lacks is a parity break that would silently
+    bias a *trusted* metric, so it is logged as a WARNING before being zero-filled.
     """
     df = holdout.copy()
     missing = [f for f in features if f not in df.columns]
@@ -193,6 +217,20 @@ def score_holdout(
         for f in missing:
             df[f] = 0.0
     df[features] = df[features].fillna(0)
+    y = df["Outcome"].to_numpy()
     probs = np.asarray(model.predict_batch(df), dtype=float)
-    brier = float(brier_score_loss(df["Outcome"].to_numpy(), probs))
-    return {"holdout_brier": brier, "holdout_n_games": int(len(df))}
+    out: dict[str, float] = {
+        "holdout_brier": float(brier_score_loss(y, probs)),
+        "holdout_n_games": int(len(df)),
+        "holdout_ece": _expected_calibration_error(y, probs),
+    }
+
+    # Score-prediction accuracy — needs the total head + actual scores in the holdout.
+    if getattr(model, "total_booster", None) is not None and {"Margin", "Total"} <= set(df.columns):
+        scored = df[df["Margin"].notna() & df["Total"].notna()]
+        if len(scored):
+            ps = model.predict_scores(scored)
+            out["holdout_margin_mae"] = float(np.abs(ps["pred_margin"].to_numpy() - scored["Margin"].to_numpy()).mean())
+            out["holdout_total_mae"] = float(np.abs(ps["pred_total"].to_numpy() - scored["Total"].to_numpy()).mean())
+            out["holdout_scored_games"] = int(len(scored))
+    return out

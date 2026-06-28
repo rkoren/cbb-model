@@ -142,8 +142,14 @@ def train(params: dict, store: DataStore, tracker: Tracker) -> CBBModel:
     })
 
     # ── Production model (all seasons) ────────────────────────────────────────
-    booster, calibrator = train_production(matchups, features, loto.temp_params, config)
-    model = loto.to_model(booster, calibrator)
+    # Total head (SC-001) trains on the sum (level) features; margin head uses `features`.
+    total_features = [c for c in matchups.columns if c.startswith("s_")]
+    if total_features and "men_women" in matchups.columns:
+        total_features = ["men_women"] + total_features
+    booster, calibrator, total_booster = train_production(
+        matchups, features, loto.temp_params, config, total_features=total_features
+    )
+    model = loto.to_model(booster, calibrator, total_booster, total_features=total_features)
 
     # ── Persist locally ───────────────────────────────────────────────────────
     proc.mkdir(parents=True, exist_ok=True)
@@ -170,11 +176,16 @@ def train(params: dict, store: DataStore, tracker: Tracker) -> CBBModel:
     if holdout_path.exists():
         try:
             hscore = score_holdout(model, store.load_parquet(HOLDOUT_PARQUET), features)
-            mlflow.log_metric("holdout_brier", hscore["holdout_brier"])
-            mlflow.log_metric("holdout_n_games", hscore["holdout_n_games"])
+            for k, v in hscore.items():
+                mlflow.log_metric(k, v)
+            extra = ""
+            if "holdout_margin_mae" in hscore:
+                extra = "  margin_MAE %.2f  total_MAE %.2f (%d scored)" % (
+                    hscore["holdout_margin_mae"], hscore["holdout_total_mae"], hscore["holdout_scored_games"],
+                )
             log.info(
-                "Holdout 2026 Brier: %.6f over %d games",
-                hscore["holdout_brier"], hscore["holdout_n_games"],
+                "Holdout 2026 Brier %.6f  ECE %.4f over %d games%s",
+                hscore["holdout_brier"], hscore["holdout_ece"], hscore["holdout_n_games"], extra,
             )
         except Exception as exc:  # noqa: BLE001
             log.warning("Holdout scoring skipped: %s", exc)

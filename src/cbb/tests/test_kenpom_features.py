@@ -48,13 +48,18 @@ def test_override_applied():
     assert result["N.C. State"] == 1001
 
 
-def test_unmatched_logged_as_warning(caplog):
+def test_unmatched_logged_as_count_not_full_list(caplog):
     kaggle = _kaggle_teams("Duke")
     kenpom = _kenpom_teams("NoSuchTeamXYZ")
-    with caplog.at_level(logging.WARNING, logger="cbb.kenpom.features"):
+    with caplog.at_level(logging.DEBUG, logger="cbb.kenpom.features"):
         result = build_team_name_map(kaggle, kenpom)
     assert "NoSuchTeamXYZ" not in result
-    assert "no Kaggle match" in caplog.text
+    # Count at INFO (no full list spam); names only at DEBUG.
+    info = [r for r in caplog.records if r.levelno == logging.INFO]
+    assert any("1 unmatched" in r.getMessage() for r in info)
+    assert any("NoSuchTeamXYZ" in r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG)
+    # The unmatched name must NOT appear at WARNING (that was the spam we removed).
+    assert not any("NoSuchTeamXYZ" in r.getMessage() for r in caplog.records if r.levelno == logging.WARNING)
 
 
 def test_unmatched_team_excluded_from_map():

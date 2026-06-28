@@ -23,8 +23,10 @@ mlruns.db
 # notebooks
 .ipynb_checkpoints/
 
-# docs (keep the PDF out of git)
+# docs
 docs/*.pdf
+# internal planning doc — kept local, not published (mirrors kitchen-platform)
+docs/backlog.md
 
 # generated Terraform (produced on demand by `recipes apply`, never committed)
 infra/tf/

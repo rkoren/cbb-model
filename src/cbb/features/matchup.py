@@ -22,6 +22,20 @@ _SCALAR_FEATS = ["Elo", "Quality", "Form", "Seed", "MasseyRank"]
 
 FEAT_COLS = _AE_COLS + _AVG_COLS + _SCALAR_FEATS
 
+# Sum (level) features for the total head (SC-001). Game totals track the SUM of both teams'
+# pace/efficiency, not the differentials the margin head uses — so the total head gets its own
+# s_<base> = A_<base> + B_<base> columns (added wherever A_/B_ exist, so train/predict stay in parity).
+TOTAL_SUM_BASES = ["AdjTempo", "AdjOE", "AdjDE", "AdjEM", "avg_Score", "avg_opp_Score"]
+
+
+def add_total_sum_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Add ``s_<base> = A_<base> + B_<base>`` columns in place for the total head."""
+    for base in TOTAL_SUM_BASES:
+        a, b = f"A_{base}", f"B_{base}"
+        if a in df.columns and b in df.columns:
+            df[f"s_{base}"] = df[a].fillna(0) + df[b].fillna(0)
+    return df
+
 
 def _safe_get(lookup: dict, key, default=np.nan):
     v = lookup.get(key, default)
@@ -221,7 +235,8 @@ def build_matchup_dataset(
             "A_TeamID": ta,
             "B_TeamID": tb,
             "Outcome": int(row["Outcome"]),
-            "PointDiff": float(row["PointDiff"]),
+            "PointDiff": float(row["PointDiff"]),       # margin = ScoreA - ScoreB (A=T1)
+            "Total": float(row["T1_Score"]) + float(row["T2_Score"]),  # ScoreA + ScoreB (SC-001)
         }
         for c in FEAT_COLS:
             rec[f"A_{c}"] = fa.get(c, np.nan)
@@ -250,6 +265,7 @@ def build_matchup_dataset(
     matchups = matchups.merge(qwm_lkp_b, on=["Season", "men_women", "B_TeamID"], how="left")
     matchups["d_quality_wtd_margin"] = matchups["A_quality_wtd_margin"] - matchups["B_quality_wtd_margin"]
 
+    add_total_sum_features(matchups)
     return matchups
 
 
@@ -312,4 +328,5 @@ def build_prediction_features(
         pred_df = pred_df.merge(qwm_b, on=["Season", "men_women", "B_TeamID"], how="left")
         pred_df["d_quality_wtd_margin"] = pred_df["A_quality_wtd_margin"] - pred_df["B_quality_wtd_margin"]
 
+    add_total_sum_features(pred_df)
     return pred_df
