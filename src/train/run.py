@@ -82,6 +82,62 @@ def _build_model_config(params: dict) -> ModelConfig:
     return config
 
 
+def _train_reg_season(params: dict, store: DataStore) -> object:
+    """Train the parallel regular-season game-level model (GM-001b, ``model.target=reg_season``).
+
+    A *separate* model from the tournament champion: it loads ``reg_games.parquet`` (built by the
+    features stage), runs LOTO-by-season CV + a 2026 holdout, and logs every metric with a
+    ``_reg`` suffix so it never collides with the tournament model's same-named metrics in the
+    shared experiment. Register its own champion with::
+
+        kitchen run train --variant reg_season --auto-promote \\
+            --promote-metric loto_brier_reg --lower-is-better --model-name cbb-reg-model
+    """
+    from cbb.train.reg_model import RegConfig, score_reg_holdout, train_reg_loto
+
+    games = store.load_parquet("reg_games.parquet")
+    mp = params.get("model", {})
+    config = RegConfig()
+    if "num_rounds" in mp:
+        config.num_rounds = int(mp["num_rounds"])
+    if "calibrator_C" in mp:
+        config.logistic_C = float(mp["calibrator_C"])
+
+    log.info("Reg-season training on %d game-rows (%d seasons)",
+             len(games), games["Season"].nunique())
+    result = train_reg_loto(games, config)
+    log.info("Reg LOTO: brier %.6f  margin_MAE %.3f  total_MAE %.3f",
+             result.metrics["loto_brier_reg"], result.metrics["loto_margin_mae_reg"],
+             result.metrics["loto_total_mae_reg"])
+
+    for k, v in result.metrics.items():
+        mlflow.log_metric(k, v)
+    for season, brier in result.brier_by_season.items():
+        mlflow.log_metric(f"brier_reg_{season}", brier)
+    mlflow.set_tag("model_variant", "reg_season")
+    mlflow.log_params({
+        "model_target": "reg_season",
+        "num_rounds_reg": config.num_rounds,
+        "num_margin_features": len(result.model.margin_features),
+        "num_total_features": len(result.model.total_features),
+    })
+
+    hscore = score_reg_holdout(result.model, games)
+    for k, v in hscore.items():
+        mlflow.log_metric(k, v)
+    if "holdout_brier_reg" in hscore:
+        log.info("Reg holdout 2026: brier %.6f  margin_MAE %.3f  total_MAE %.3f over %d games",
+                 hscore["holdout_brier_reg"], hscore["holdout_margin_mae_reg"],
+                 hscore["holdout_total_mae_reg"], int(hscore["holdout_n_games_reg"]))
+
+    proc = store.processed_dir
+    proc.mkdir(parents=True, exist_ok=True)
+    with open(proc / "reg_model.pkl", "wb") as f:
+        pickle.dump(result.model, f)
+    log_sklearn_model(result.model, "cbb_model")  # same artifact path → registry/evaluate load it
+    return result.model
+
+
 def train(params: dict, store: DataStore, tracker: Tracker) -> CBBModel:
     """Run the full CBB training pipeline and return the production CBBModel.
 
@@ -103,6 +159,12 @@ def train(params: dict, store: DataStore, tracker: Tracker) -> CBBModel:
         The trained ``CBBModel`` (also saved to ``data/processed/cbb_model.pkl``
         and logged as an MLflow sklearn artifact).
     """
+    # GM-001b: `model.target=reg_season` (set by the `reg_season` menu variant) trains the
+    # parallel regular-season model instead of the tournament one. The platform is single-model
+    # per project (one hard-coded `train` stage), so a target switch is the seam — see CBB-020.
+    if params.get("model", {}).get("target", "tournament") == "reg_season":
+        return _train_reg_season(params, store)
+
     feature_candidates: list[str] = params.get("feature_candidates", FEATURE_CANDIDATES)
 
     # Load processed matchup dataset

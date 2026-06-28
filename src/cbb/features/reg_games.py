@@ -107,19 +107,28 @@ def build_reg_game_dataset(
     games["d_Elo_pre"] = games["A_Elo_pre"] - games["B_Elo_pre"]
     for b in prior_bases:
         games[f"d_{b}_prev"] = games[f"A_{b}_prev"] - games[f"B_{b}_prev"]
-        games[f"s_{b}_prev"] = games[f"A_{b}_prev"].fillna(0) + games[f"B_{b}_prev"].fillna(0)
+        # NaN propagates when a side has no prior (first-season team): a half-sum would mislead the
+        # total head; the trainer zero-fills NaN uniformly, which is the consistent "missing" signal.
+        games[f"s_{b}_prev"] = games[f"A_{b}_prev"] + games[f"B_{b}_prev"]
     return games
 
 
 def build_reg_games(
     data: dict[str, pd.DataFrame],
     adj_eff: pd.DataFrame,
+    asof_snapshots: pd.DataFrame | None = None,
+    dayzero_by_season: dict | None = None,
 ) -> pd.DataFrame:
     """Build the combined men's + women's regular-season game-level dataset.
 
     Args:
         data: The raw-CSV dict (needs ``M_reg_raw``/``W_reg_raw``), as built by the features stage.
         adj_eff: Output of :func:`compute_adj_efficiency` (all seasons, both genders).
+        asof_snapshots: Optional long frame of as-of-date KenPom snapshots (GM-002), from
+            :func:`cbb.kenpom.asof_features.load_all_archive_snapshots`. When given (with
+            ``dayzero_by_season``), within-season ``*_kp_*_asof`` features are joined in.
+        dayzero_by_season: ``Season → DayZero`` (from ``MSeasons``), to turn ``DayNum`` into a
+            calendar date for the as-of join. Required alongside ``asof_snapshots``.
 
     Returns:
         Concatenated symmetric reg-season game dataset (see :func:`build_reg_game_dataset`).
@@ -131,4 +140,16 @@ def build_reg_games(
         reg_raw = data[key]
         pregame = compute_pregame_elo(reg_raw, men_women_flag=mw)
         parts.append(build_reg_game_dataset(reg_raw, pregame, adj_eff, men_women=mw))
-    return pd.concat(parts, ignore_index=True)
+    games = pd.concat(parts, ignore_index=True)
+
+    # As-of-date KenPom (GM-002) — additive, men's-only, no-op when snapshots absent.
+    if asof_snapshots is not None and len(asof_snapshots) and dayzero_by_season:
+        from cbb.kenpom.asof_features import add_asof_kenpom  # noqa: PLC0415
+
+        games, added = add_asof_kenpom(games, asof_snapshots, dayzero_by_season)
+        if added:
+            import logging  # noqa: PLC0415
+            logging.getLogger(__name__).info(
+                "As-of KenPom features joined into reg_games: %d cols", len(added)
+            )
+    return games

@@ -76,7 +76,9 @@ submission:
 
 thresholds:
   loto_brier:
-    max: 0.175            # CI fails if Brier degrades past this
+    max: 0.175            # CI fails if Brier degrades past this (tournament model)
+  loto_brier_reg:
+    max: 0.190            # reg-season model (GM-001b); only logged on `--variant reg_season` runs
 
 features:
   raw_files:
@@ -125,6 +127,13 @@ variants:
     feature_candidates:
       add: [d_kp_APL_Def, d_kp_APL_Off, d_kp_Luck, d_kp_SOS,
             d_kp_AvgHgt, d_kp_HgtEff, d_kp_Exp, d_kp_Bench, d_kp_Continuity]
+  # GM-001b: trains the *parallel* regular-season game-level model (own `cbb-reg-model` champion).
+  # The target switch in src/train/run.py loads reg_games.parquet and trains margin+total+calibrator.
+  #   kitchen run train --variant reg_season --auto-promote \
+  #       --promote-metric loto_brier_reg --lower-is-better --model-name cbb-reg-model
+  reg_season:
+    model:
+      target: reg_season
 
 # Feature columns sent to XGBoost (filtered to those present in matchup DataFrame)
 feature_candidates:

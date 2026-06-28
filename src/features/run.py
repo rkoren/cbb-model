@@ -88,7 +88,7 @@ def _apply_kenpom(
     seasons: list[int],
     m_teams: pd.DataFrame,
     kenpom_dir: Path = KENPOM_DIR,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[int, dict]]:
     """Best-effort KenPom integration: efficiency overlay + rich feature frame.
 
     For each season with a cached ``kenpom_ratings_{season}.parquet`` the KenPom→Kaggle team
@@ -100,11 +100,13 @@ def _apply_kenpom(
          cached ``kenpom_height_{season}.parquet`` exists (height is fetched/DVC-tracked
          separately, so it is simply absent until then).
 
-    Women's rows are preserved from manual computation. Returns ``(adj_eff, kp_rich)`` where
-    ``kp_rich`` is keyed (Season, men_women, TeamID) with ``kp_*`` columns — an empty frame
-    when no KenPom data is available, which downstream joins handle as a no-op.
+    Women's rows are preserved from manual computation. Returns ``(adj_eff, kp_rich, team_maps)``
+    where ``kp_rich`` is keyed (Season, men_women, TeamID) with ``kp_*`` columns (empty when no
+    KenPom data is available — downstream joins handle it as a no-op) and ``team_maps`` is
+    ``{season: {KenPom name → Kaggle TeamID}}`` (reused for the GM-002 as-of-date archive join).
     """
     kp_frames: list[pd.DataFrame] = []
+    team_maps: dict[int, dict] = {}
     try:
         from cbb.kenpom import KenPomClient  # noqa: PLC0415
 
@@ -116,6 +118,7 @@ def _apply_kenpom(
                 continue
             try:
                 team_map = build_team_name_map(m_teams, client.teams(year=s))
+                team_maps[s] = team_map
             except Exception as exc:  # noqa: BLE001
                 log.warning("KenPom team map failed for season %d: %s", s, exc)
                 continue
@@ -146,7 +149,38 @@ def _apply_kenpom(
         if kp_frames
         else pd.DataFrame(columns=["Season", "men_women", "TeamID"])
     )
-    return adj_eff, kp_rich
+    return adj_eff, kp_rich, team_maps
+
+
+ARCHIVE_DIR = KENPOM_DIR / "archive"
+
+
+def _load_asof_inputs(
+    seasons: list[int], team_maps: dict[int, dict], store: DataStore
+) -> tuple[pd.DataFrame, dict]:
+    """Load the GM-002 as-of-date inputs: cached archive snapshots + Season→DayZero.
+
+    Best-effort: returns an empty snapshot frame (→ reg_games join is a no-op) when no archive
+    parquets are cached or ``MSeasons`` is unavailable. Reuses the ``team_maps`` already built by
+    :func:`_apply_kenpom`, so no extra KenPom API calls.
+    """
+    from cbb.kenpom.asof_features import load_all_archive_snapshots  # noqa: PLC0415
+
+    try:
+        snaps = load_all_archive_snapshots(seasons, ARCHIVE_DIR, team_maps)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("As-of KenPom snapshots skipped: %s", exc)
+        snaps = pd.DataFrame()
+    dayzero: dict = {}
+    try:
+        ms = store.load_csv("MSeasons.csv")
+        dayzero = dict(zip(ms["Season"], pd.to_datetime(ms["DayZero"])))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("MSeasons (DayZero) unavailable — as-of join disabled: %s", exc)
+    if len(snaps):
+        log.info("As-of KenPom: %d snapshot-rows across %d seasons",
+                 len(snaps), snaps["Season"].nunique())
+    return snaps, dayzero
 
 
 def build(params: dict, store: DataStore) -> None:
@@ -194,7 +228,7 @@ def build(params: dict, store: DataStore) -> None:
     log.info("adj_eff: %d rows  mean iters %.1f", len(adj_eff), adj_eff["iters"].mean())
 
     seasons = sorted(reg_sym["Season"].unique().tolist())
-    adj_eff, kp_rich = _apply_kenpom(adj_eff, seasons, data["M_teams"])
+    adj_eff, kp_rich, team_maps = _apply_kenpom(adj_eff, seasons, data["M_teams"])
     store.save_parquet(adj_eff, "adj_eff.parquet")
 
     season_avgs = add_four_factors(compute_season_averages(reg_sym))
@@ -283,7 +317,10 @@ def build(params: dict, store: DataStore) -> None:
     # leakage). Best-effort so a failure here never blocks the Kaggle features build. Season
     # 2026 is left in the frame but excluded from training as the trusted reg-season holdout.
     try:
-        reg_games = build_reg_games(data, adj_eff)
+        # As-of-date KenPom (GM-002): load cached weekly archive snapshots (men's, 2012+) and the
+        # Season→DayZero map; best-effort — absent snapshots make the join a no-op (Elo+priors only).
+        asof_snaps, dayzero = _load_asof_inputs(seasons, team_maps, store)
+        reg_games = build_reg_games(data, adj_eff, asof_snapshots=asof_snaps, dayzero_by_season=dayzero)
         store.save_parquet(reg_games, "reg_games.parquet")
         log.info(
             "Reg-season game dataset → %s  (%d rows, %d cols, seasons %d-%d)",

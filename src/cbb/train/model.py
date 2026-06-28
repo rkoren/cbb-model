@@ -28,7 +28,11 @@ log = logging.getLogger(__name__)
 # non-sklearn types — the wrapper class itself and the xgboost Booster — so they must be
 # declared trusted at log time, or `mlflow.sklearn.load_model` fails later in
 # evaluate/promote/serve with "references untrusted types".
-SKOPS_TRUSTED_TYPES: list[str] = ["cbb.train.model.CBBModel", "xgboost.core.Booster"]
+SKOPS_TRUSTED_TYPES: list[str] = [
+    "cbb.train.model.CBBModel",
+    "cbb.train.reg_model.RegModel",  # GM-001b parallel reg-season model bundle
+    "xgboost.core.Booster",
+]
 
 
 def log_sklearn_model(obj: object, name: str):
