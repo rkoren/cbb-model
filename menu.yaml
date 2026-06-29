@@ -117,6 +117,19 @@ evaluate:
   holdout_season: 2026
   metrics_file: metrics.json
 
+# Frozen 2026 holdout (CBB-017) — the platform scores every train run's model on this
+# leak-free, never-trained-on set and logs `holdout_brier`, a trusted generalization number
+# distinct from the in-CV `loto_brier`. The parquet is built (with feature parity) by the
+# features stage; absent until the 2026 results are dropped in → the platform no-ops.
+# `predict_method: predict_batch` is CBBModel's custom predict surface. `features` is omitted
+# on purpose: it defaults to `feature_candidates`, which `--variant` keeps in sync with the
+# model actually being trained (a baseline run scores its 48 features, kenpom_rich its 57).
+holdout:
+  path: data/processed/holdout_2026.parquet
+  label: Outcome
+  metric: brier
+  predict_method: predict_batch
+
 # Experiment variants — multi-field overlays applied with `kitchen run train --variant <name>`
 # (tagged as model_variant so leaderboard/diff group them). The kenpom_rich variant adds the
 # KenPom rich differentials that `kitchen run features` joins into matchups.

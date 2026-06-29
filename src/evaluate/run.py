@@ -9,12 +9,13 @@ The model handed in is the **production champion**, trained on every season in
 ``matchups.parquet`` (2003–2025). Scoring it back on those same rows is therefore
 *in-sample* (resubstitution) — optimistic and NOT a generalization metric. SC-004:
 those numbers are emitted as ``insample_brier`` (clearly named so they can't be
-read as leave-one-tournament-out folds), and the genuinely leak-free generalization
-number comes from scoring the champion on the 2026 holdout (``holdout_brier`` etc.),
-which it never trained on. The leak-aware CV ``loto_brier`` is owned by the *train*
-stage; evaluate no longer emits that name (it used to, which overwrote train's real
-LOTO with the optimistic in-sample value in each run's metrics — poisoning the
-threshold gate and leaderboard).
+read as leave-one-tournament-out folds). This stage owns **only** that in-sample
+diagnostic: the two trusted, leak-free numbers are owned by other parts of the
+platform so they can't collide here (the CBB-019 last-write-wins footgun) — the
+CV ``loto_brier`` by the *train* stage, and the 2026 ``holdout_brier`` by the
+platform's ``holdout:`` config (CBB-017), which scores every train run's model on
+the frozen holdout the features stage builds. (evaluate used to emit ``loto_brier``
+and score the holdout itself; both were removed.)
 """
 
 from __future__ import annotations
@@ -28,7 +29,6 @@ import numpy as np
 from kitchen.store import DataStore
 
 from cbb.evaluate import per_season_brier
-from cbb.holdout import HOLDOUT_PARQUET, score_holdout
 from cbb.train.model import CBBModel
 
 log = logging.getLogger(__name__)
@@ -49,20 +49,22 @@ def evaluate(model: CBBModel | object, params: dict, store: DataStore) -> dict[s
         store: ``DataStore`` rooted at the project directory.
 
     Returns:
-        Flat dict of metric_name → float. The ``insample_*`` keys are resubstitution
-        diagnostics (champion scored on its own training seasons); the ``holdout_*``
-        keys are the leak-free generalization metrics (2026, never trained on)::
+        Flat dict of metric_name → float — the ``insample_*`` resubstitution
+        diagnostics (champion scored on its own training seasons, optimistic by
+        construction)::
 
             {
                 "insample_brier": 0.1221,        # optimistic — fit check, NOT generalization
                 "insample_brier_2024": 0.1180,
                 "insample_brier_2025": 0.1150,
-                "holdout_brier": 0.1718,         # leak-free headline
-                "holdout_ece": 0.0901,
-                "holdout_n_games": 67,
             }
 
         Also written to ``metrics.json`` (path from ``params.evaluate.metrics_file``).
+
+        The leak-free generalization number (``holdout_brier``) is no longer produced
+        here: the platform's ``holdout:`` config (CBB-017) scores every train run's model
+        on the frozen 2026 holdout and logs it to MLflow. Emitting it here too would
+        double-log the metric into one run (the CBB-019 last-write-wins footgun).
     """
     matchups = store.load_parquet("matchups.parquet")
     # Every row in matchups.parquet is a tournament game — build_matchup_dataset is
@@ -95,28 +97,11 @@ def evaluate(model: CBBModel | object, params: dict, store: DataStore) -> dict[s
         metrics["insample_brier"], sorted(per_season),
     )
 
-    # ── Leak-free generalization: score the champion on the 2026 holdout. ─────────
-    # Use the features the *loaded model* expects (model.features) rather than
-    # re-deriving from menu.yaml, which could drift from what the champion trained on.
-    # No-op until the holdout parquet is built (mirrors the train-stage guard).
-    holdout_path = store.processed_dir / HOLDOUT_PARQUET
-    if holdout_path.exists() and getattr(model, "features", None):
-        try:
-            hscore = score_holdout(model, store.load_parquet(HOLDOUT_PARQUET), model.features)
-            metrics.update({k: float(v) for k, v in hscore.items()})
-            extra = ""
-            if "holdout_margin_mae" in hscore:
-                extra = "  margin_MAE %.2f  total_MAE %.2f" % (
-                    hscore["holdout_margin_mae"], hscore["holdout_total_mae"],
-                )
-            log.info(
-                "Holdout 2026 Brier %.6f  ECE %.4f over %d games%s",
-                hscore["holdout_brier"], hscore["holdout_ece"], hscore["holdout_n_games"], extra,
-            )
-        except Exception as exc:  # noqa: BLE001
-            log.warning("Holdout scoring skipped: %s", exc)
-    else:
-        log.info("No %s (or model lacks .features) — holdout_brier not logged", HOLDOUT_PARQUET)
+    # ── Leak-free generalization (holdout_brier) is now the platform's job. ───────
+    # The platform's `holdout:` config (CBB-017) scores every train run's model on the
+    # frozen 2026 holdout parquet — which `src/features/run.py` still builds with feature
+    # parity — and logs `holdout_<metric>` onto the run. This stage only owns the in-sample
+    # diagnostic above; scoring the holdout here too would double-log it (CBB-019).
 
     metrics_file = params.get("evaluate", {}).get("metrics_file", "metrics.json")
     Path(metrics_file).write_text(json.dumps(metrics, indent=2), encoding="utf-8")
