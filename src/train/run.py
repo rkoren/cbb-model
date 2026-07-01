@@ -95,6 +95,12 @@ def _train_reg_season(params: dict, store: DataStore) -> object:
     """
     from cbb.train.reg_model import RegConfig, score_reg_holdout, train_reg_loto
 
+    # The platform's `holdout:` config (CBB-017) is the *tournament* holdout (holdout_2026.parquet,
+    # tournament matchup features) — inapplicable to a RegModel (reg-game features). train_flow scores
+    # it from this same params dict after train() returns, so pop it here to disable that scoring for
+    # reg_season runs; the reg model scores its own holdout below (holdout_*_reg). See CBB-025.
+    params.pop("holdout", None)
+
     games = store.load_parquet("reg_games.parquet")
     mp = params.get("model", {})
     config = RegConfig()
