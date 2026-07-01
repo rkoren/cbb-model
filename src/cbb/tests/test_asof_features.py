@@ -11,7 +11,7 @@ import pandas as pd
 import pytest
 
 from cbb.kenpom.asof_features import (
-    add_asof_kenpom,
+    add_asof_features,
     game_dates,
     load_archive_snapshots,
 )
@@ -51,24 +51,24 @@ def test_game_dates_from_dayzero():
 def test_same_day_snapshot_excluded():
     # Game on 2025-01-08 (a snapshot date) must take the 2025-01-01 snapshot (AdjEM 10),
     # NOT the same-day 2025-01-08 one (AdjEM 20) — which would include the game's own result.
-    out, _ = add_asof_kenpom(_games([14]), _snaps(), DZ)  # DayNum 14 = 2025-01-08
+    out, _ = add_asof_features(_games([14]), _snaps(), DZ)  # DayNum 14 = 2025-01-08
     assert out["A_kp_AdjEM_asof"].iloc[0] == pytest.approx(10.0)
 
 
 def test_takes_latest_prior_snapshot():
-    out, _ = add_asof_kenpom(_games([15]), _snaps(), DZ)  # DayNum 15 = 2025-01-09
+    out, _ = add_asof_features(_games([15]), _snaps(), DZ)  # DayNum 15 = 2025-01-09
     assert out["A_kp_AdjEM_asof"].iloc[0] == pytest.approx(20.0)  # the 01-08 snapshot now qualifies
 
 
 def test_before_first_snapshot_is_nan():
-    out, _ = add_asof_kenpom(_games([6]), _snaps(), DZ)  # DayNum 6 = 2024-12-31, before any snapshot
+    out, _ = add_asof_features(_games([6]), _snaps(), DZ)  # DayNum 6 = 2024-12-31, before any snapshot
     assert pd.isna(out["A_kp_AdjEM_asof"].iloc[0])
 
 
 # ── differentials / sums / coverage ─────────────────────────────────────────────
 
 def test_differential_and_sum():
-    out, added = add_asof_kenpom(_games([15]), _snaps(), DZ)
+    out, added = add_asof_features(_games([15]), _snaps(), DZ)
     row = out.iloc[0]
     assert row["d_kp_AdjEM_asof"] == pytest.approx(20.0 - 8.0)        # A 1101=20, B 1102=8
     assert row["s_kp_AdjTempo_asof"] == pytest.approx(67.0 + 67.0)   # both 01-08 snapshots → 67
@@ -79,7 +79,7 @@ def test_unknown_team_propagates_nan():
     # Women / non-archive team (3101) → no snapshot → NaN. The SUM must also be NaN, not a
     # half-sum (real + 0) — a partial sum would mislead the total head; the trainer zero-fills
     # NaN uniformly instead (the consistent "missing" signal).
-    out, _ = add_asof_kenpom(_games([15], a=3101), _snaps(), DZ)
+    out, _ = add_asof_features(_games([15], a=3101), _snaps(), DZ)
     row = out.iloc[0]
     assert pd.isna(row["A_kp_AdjEM_asof"]) and pd.isna(row["d_kp_AdjEM_asof"])
     assert pd.isna(row["s_kp_AdjEM_asof"])  # one side NaN → sum NaN (no partial half-sum)
@@ -87,13 +87,13 @@ def test_unknown_team_propagates_nan():
 
 def test_noop_when_snapshots_empty():
     g = _games([15])
-    out, added = add_asof_kenpom(g, pd.DataFrame(), DZ)
+    out, added = add_asof_features(g, pd.DataFrame(), DZ)
     assert added == [] and "A_kp_AdjEM_asof" not in out.columns
 
 
 def test_row_order_preserved():
     # Multiple games out of date order → as-of values must map back to the right rows.
-    out, _ = add_asof_kenpom(_games([15, 6, 14]), _snaps(), DZ)
+    out, _ = add_asof_features(_games([15, 6, 14]), _snaps(), DZ)
     assert out["A_kp_AdjEM_asof"].iloc[0] == pytest.approx(20.0)   # DayNum 15
     assert pd.isna(out["A_kp_AdjEM_asof"].iloc[1])                 # DayNum 6
     assert out["A_kp_AdjEM_asof"].iloc[2] == pytest.approx(10.0)   # DayNum 14 (same-day excluded)

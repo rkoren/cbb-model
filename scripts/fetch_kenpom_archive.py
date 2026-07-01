@@ -58,16 +58,22 @@ def main() -> None:
         have = set(existing["ArchiveDate"].astype(str)) if existing is not None else set()
 
         new_parts = []
-        for d in _snapshot_dates(s, dayzero[s]):
+        # GM-005: the preseason snapshot — KenPom's roster-aware "game 0" projection — stamped just
+        # before DayZero so the as-of merge seeds it for pre-first-weekly-snapshot early-season games.
+        preseason_date = (dayzero[s] - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+        for d in [preseason_date, *_snapshot_dates(s, dayzero[s])]:
             if d in have:
                 continue
             try:
-                snap = client.ratings_archive(date=d)
+                if d == preseason_date:
+                    snap = client.ratings_archive(preseason=True, year=s)
+                else:
+                    snap = client.ratings_archive(date=d)
                 snap = snap[[c for c in KEEP if c in snap.columns]].copy()
                 snap["ArchiveDate"] = d
                 new_parts.append(snap)
             except Exception as exc:  # noqa: BLE001
-                print(f"  {s} {d}: FAILED ({exc})")
+                print(f"  {s} {d}: FAILED ({str(exc).splitlines()[0]})")
 
         if not new_parts and existing is not None:
             print(f"  {s}: up to date ({len(have)} snapshots)")

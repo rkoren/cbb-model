@@ -107,19 +107,20 @@ def _asof_side(games: pd.DataFrame, snapshots: pd.DataFrame, side: str, feats: l
     return merged.sort_values("_ord")[feats].reset_index(drop=True)
 
 
-def add_asof_kenpom(
+def add_asof_features(
     games: pd.DataFrame,
     snapshots: pd.DataFrame,
     dayzero_by_season: dict[int, "pd.Timestamp"],
 ) -> tuple[pd.DataFrame, list[str]]:
-    """Attach ``A_/B_/d_/s_`` as-of KenPom features to the symmetric reg-season game frame.
+    """Attach ``A_/B_/d_/s_`` as-of features to the symmetric reg-season game frame.
 
-    For each side, merge-asof each team's most recent snapshot *strictly before* the game date,
-    then form differentials (``d_*`` → margin head) and sums (``s_*`` → total head), mirroring the
-    ``*_prev`` priors so the reg model's prefix-based feature derivation picks them up unchanged.
-    No-op (returns ``(games, [])``) when no snapshots are available.
+    Source-generic (KenPom ``kp_*_asof`` men, BartTorvik ``tv_*_asof`` women, WM-003): any column
+    in ``snapshots`` ending ``_asof`` is joined. For each side, merge-asof each team's most recent
+    snapshot *strictly before* the game date, then form differentials (``d_*`` → margin head) and
+    sums (``s_*`` → total head), mirroring the ``*_prev`` priors so the reg model's prefix-based
+    feature derivation picks them up unchanged. No-op (``(games, [])``) when no snapshots.
     """
-    feats = [c for c in ASOF_FEATURES if c in snapshots.columns]
+    feats = [c for c in snapshots.columns if c.endswith("_asof")]
     if not feats or snapshots.empty:
         return games, []
 

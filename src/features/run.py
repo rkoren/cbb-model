@@ -88,6 +88,7 @@ def _apply_kenpom(
     seasons: list[int],
     m_teams: pd.DataFrame,
     kenpom_dir: Path = KENPOM_DIR,
+    team_spellings: pd.DataFrame | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[int, dict]]:
     """Best-effort KenPom integration: efficiency overlay + rich feature frame.
 
@@ -117,7 +118,7 @@ def _apply_kenpom(
             if not ratings_path.exists():
                 continue
             try:
-                team_map = build_team_name_map(m_teams, client.teams(year=s))
+                team_map = build_team_name_map(m_teams, client.teams(year=s), team_spellings)
                 team_maps[s] = team_map
             except Exception as exc:  # noqa: BLE001
                 log.warning("KenPom team map failed for season %d: %s", s, exc)
@@ -153,34 +154,55 @@ def _apply_kenpom(
 
 
 ARCHIVE_DIR = KENPOM_DIR / "archive"
+TORVIK_DIR = Path("data/torvik")
 
 
 def _load_asof_inputs(
     seasons: list[int], team_maps: dict[int, dict], store: DataStore
-) -> tuple[pd.DataFrame, dict]:
-    """Load the GM-002 as-of-date inputs: cached archive snapshots + Season→DayZero.
+) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
+    """Load the as-of-date inputs: KenPom archive (men, GM-002) + Torvik women (WM-003) + DayZero.
 
-    Best-effort: returns an empty snapshot frame (→ reg_games join is a no-op) when no archive
-    parquets are cached or ``MSeasons`` is unavailable. Reuses the ``team_maps`` already built by
-    :func:`_apply_kenpom`, so no extra KenPom API calls.
+    Best-effort: any missing cache → an empty frame (→ that join is a no-op). Reuses the KenPom
+    ``team_maps`` from :func:`_apply_kenpom`; builds women team maps from WTeams+WTeamSpellings
+    against the cached Torvik names (no external call). M/W DayZero are identical, so one dict serves.
     """
+    from cbb.features.torvik_asof import load_all_torvik_women  # noqa: PLC0415
     from cbb.kenpom.asof_features import load_all_archive_snapshots  # noqa: PLC0415
+    from cbb.kenpom.features import build_team_name_map  # noqa: PLC0415
 
-    try:
-        snaps = load_all_archive_snapshots(seasons, ARCHIVE_DIR, team_maps)
-    except Exception as exc:  # noqa: BLE001
-        log.warning("As-of KenPom snapshots skipped: %s", exc)
-        snaps = pd.DataFrame()
     dayzero: dict = {}
     try:
         ms = store.load_csv("MSeasons.csv")
         dayzero = dict(zip(ms["Season"], pd.to_datetime(ms["DayZero"])))
     except Exception as exc:  # noqa: BLE001
         log.warning("MSeasons (DayZero) unavailable — as-of join disabled: %s", exc)
-    if len(snaps):
-        log.info("As-of KenPom: %d snapshot-rows across %d seasons",
-                 len(snaps), snaps["Season"].nunique())
-    return snaps, dayzero
+
+    try:
+        kp = load_all_archive_snapshots(seasons, ARCHIVE_DIR, team_maps)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("As-of KenPom snapshots skipped: %s", exc)
+        kp = pd.DataFrame()
+
+    # BartTorvik women: build women team maps from the cached Torvik names, then load snapshots.
+    tv = pd.DataFrame()
+    try:
+        w_teams = store.load_csv("WTeams.csv")
+        w_spell = store.load_csv("WTeamSpellings.csv")
+        w_maps: dict[int, dict] = {}
+        for s in seasons:
+            p = TORVIK_DIR / f"torvik_women_{s}.parquet"
+            if p.exists():
+                names = pd.read_parquet(p)[["team"]].drop_duplicates().rename(columns={"team": "TeamName"})
+                w_maps[s] = build_team_name_map(w_teams, names, w_spell)
+        tv = load_all_torvik_women(seasons, TORVIK_DIR, w_maps)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("As-of Torvik-women snapshots skipped: %s", exc)
+
+    for label, snaps in (("KenPom", kp), ("Torvik-women", tv)):
+        if len(snaps):
+            log.info("As-of %s: %d snapshot-rows across %d seasons",
+                     label, len(snaps), snaps["Season"].nunique())
+    return kp, tv, dayzero
 
 
 def build(params: dict, store: DataStore) -> None:
@@ -228,7 +250,16 @@ def build(params: dict, store: DataStore) -> None:
     log.info("adj_eff: %d rows  mean iters %.1f", len(adj_eff), adj_eff["iters"].mean())
 
     seasons = sorted(reg_sym["Season"].unique().tolist())
-    adj_eff, kp_rich, team_maps = _apply_kenpom(adj_eff, seasons, data["M_teams"])
+    # MTeamSpellings (Kaggle's name-variant table) lifts KenPom→Kaggle mid-major recall ~84%→100%
+    # (GM-004) — more teams get KenPom efficiency + as-of features. Best-effort: absent → fuzzy-only.
+    try:
+        team_spellings = store.load_csv("MTeamSpellings.csv")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("MTeamSpellings.csv unavailable — name map falls back to fuzzy-only: %s", exc)
+        team_spellings = None
+    adj_eff, kp_rich, team_maps = _apply_kenpom(
+        adj_eff, seasons, data["M_teams"], team_spellings=team_spellings
+    )
     store.save_parquet(adj_eff, "adj_eff.parquet")
 
     season_avgs = add_four_factors(compute_season_averages(reg_sym))
@@ -319,8 +350,9 @@ def build(params: dict, store: DataStore) -> None:
     try:
         # As-of-date KenPom (GM-002): load cached weekly archive snapshots (men's, 2012+) and the
         # Season→DayZero map; best-effort — absent snapshots make the join a no-op (Elo+priors only).
-        asof_snaps, dayzero = _load_asof_inputs(seasons, team_maps, store)
-        reg_games = build_reg_games(data, adj_eff, asof_snapshots=asof_snaps, dayzero_by_season=dayzero)
+        asof_snaps, torvik_women, dayzero = _load_asof_inputs(seasons, team_maps, store)
+        reg_games = build_reg_games(data, adj_eff, asof_snapshots=asof_snaps,
+                                    dayzero_by_season=dayzero, torvik_women_snapshots=torvik_women)
         store.save_parquet(reg_games, "reg_games.parquet")
         log.info(
             "Reg-season game dataset → %s  (%d rows, %d cols, seasons %d-%d)",

@@ -45,6 +45,7 @@ def build_reg_game_dataset(
     adj_eff: pd.DataFrame,
     men_women: int,
     prior_bases: list[str] | None = None,
+    rolling: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Build the symmetric A/B regular-season game-level dataset for one gender.
 
@@ -77,6 +78,14 @@ def build_reg_game_dataset(
         ren = {"TeamID": tid_col, **{b: f"{side}_{b}_prev" for b in prior_bases}}
         g = g.merge(prior.rename(columns=ren), on=["Season", tid_col], how="left")
 
+    # Rolling as-of box-score features (GM-003) — W_/L_ bs_*_asof, no-op when not provided.
+    from .rolling import BS_FEATURES  # noqa: PLC0415
+    bs_feats = BS_FEATURES if rolling is not None and len(rolling) else []
+    if bs_feats:
+        keep = ["Season", "DayNum", "WTeamID", "LTeamID"] + \
+            [f"W_{f}" for f in bs_feats] + [f"L_{f}" for f in bs_feats]
+        g = g.merge(rolling[keep], on=["Season", "DayNum", "WTeamID", "LTeamID"], how="left")
+
     margin = (g["WScore"] - g["LScore"]).to_numpy(dtype=float)
     total = (g["WScore"] + g["LScore"]).to_numpy(dtype=float)
 
@@ -99,6 +108,9 @@ def build_reg_game_dataset(
         for b in prior_bases:
             rec[f"A_{b}_prev"] = g[f"{win}_{b}_prev"].to_numpy()
             rec[f"B_{b}_prev"] = g[f"{los}_{b}_prev"].to_numpy()
+        for f in bs_feats:
+            rec[f"A_{f}"] = g[f"{win}_{f}"].to_numpy()
+            rec[f"B_{f}"] = g[f"{los}_{f}"].to_numpy()
         frames.append(rec)
 
     games = pd.concat(frames, ignore_index=True)
@@ -110,6 +122,9 @@ def build_reg_game_dataset(
         # NaN propagates when a side has no prior (first-season team): a half-sum would mislead the
         # total head; the trainer zero-fills NaN uniformly, which is the consistent "missing" signal.
         games[f"s_{b}_prev"] = games[f"A_{b}_prev"] + games[f"B_{b}_prev"]
+    for f in bs_feats:  # GM-003: d_ margin (net eff), s_ total (pace × scoring level)
+        games[f"d_{f}"] = games[f"A_{f}"] - games[f"B_{f}"]
+        games[f"s_{f}"] = games[f"A_{f}"] + games[f"B_{f}"]  # NaN propagates (same reason as *_prev)
     return games
 
 
@@ -118,6 +133,7 @@ def build_reg_games(
     adj_eff: pd.DataFrame,
     asof_snapshots: pd.DataFrame | None = None,
     dayzero_by_season: dict | None = None,
+    torvik_women_snapshots: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Build the combined men's + women's regular-season game-level dataset.
 
@@ -134,22 +150,26 @@ def build_reg_games(
         Concatenated symmetric reg-season game dataset (see :func:`build_reg_game_dataset`).
     """
     from .elo import compute_pregame_elo  # noqa: PLC0415
+    from .rolling import compute_rolling_boxscore  # noqa: PLC0415
 
     parts = []
     for key, mw in (("M_reg_raw", 0), ("W_reg_raw", 1)):
         reg_raw = data[key]
         pregame = compute_pregame_elo(reg_raw, men_women_flag=mw)
-        parts.append(build_reg_game_dataset(reg_raw, pregame, adj_eff, men_women=mw))
+        rolling = compute_rolling_boxscore(reg_raw, men_women_flag=mw)  # GM-003: as-of box-score, both genders
+        parts.append(build_reg_game_dataset(reg_raw, pregame, adj_eff, men_women=mw, rolling=rolling))
     games = pd.concat(parts, ignore_index=True)
 
-    # As-of-date KenPom (GM-002) — additive, men's-only, no-op when snapshots absent.
-    if asof_snapshots is not None and len(asof_snapshots) and dayzero_by_season:
-        from cbb.kenpom.asof_features import add_asof_kenpom  # noqa: PLC0415
+    # As-of-date ratings — shared merge_asof pipeline, additive, no-op when snapshots absent:
+    # KenPom kp_*_asof (GM-002, men) and BartTorvik tv_*_asof (WM-003, women 2025+).
+    if dayzero_by_season:
+        import logging  # noqa: PLC0415
 
-        games, added = add_asof_kenpom(games, asof_snapshots, dayzero_by_season)
-        if added:
-            import logging  # noqa: PLC0415
-            logging.getLogger(__name__).info(
-                "As-of KenPom features joined into reg_games: %d cols", len(added)
-            )
+        from cbb.kenpom.asof_features import add_asof_features  # noqa: PLC0415
+        log = logging.getLogger(__name__)
+        for label, snaps in (("KenPom", asof_snapshots), ("Torvik-women", torvik_women_snapshots)):
+            if snaps is not None and len(snaps):
+                games, added = add_asof_features(games, snaps, dayzero_by_season)
+                if added:
+                    log.info("As-of %s features joined into reg_games: %d cols", label, len(added))
     return games

@@ -34,7 +34,7 @@ _NAME_OVERRIDES: dict[str, str] = {
     "St. Francis (NY)": "St Francis NY",
     "St. Francis (PA)": "St Francis PA",
     "St. Thomas": "St Thomas MN",
-    "UT Rio Grande Valley": "UT Rio Grande Vly",
+    "UT Rio Grande Valley": "UTRGV",
     # KP-003: abbreviation mismatches the 0.85 fuzzy just misses (surfaced building the
     # 2026 holdout — all eight were dropped tournament teams).
     "Kennesaw St.": "Kennesaw",
@@ -43,6 +43,17 @@ _NAME_OVERRIDES: dict[str, str] = {
     "North Dakota St.": "N Dakota St",
     "Saint Louis": "St Louis",
     "Queens": "Queens NC",
+    # GM-004: the last mid-majors the MTeamSpellings table still misses (surfaced benchmarking
+    # FanMatch — these use Kaggle abbreviations not in the spellings variants).
+    "Arkansas Pine Bluff": "Ark Pine Bluff",
+    "Cal St. Bakersfield": "CS Bakersfield",
+    "Illinois Chicago": "IL Chicago",
+    "Louisiana Monroe": "ULM",
+    "Mississippi Valley St.": "MS Valley St",
+    "Saint Francis": "St Francis PA",  # SFNY dropped to D-III → "Saint Francis" is PA now
+    "Southeast Missouri": "SE Missouri St",
+    "Tennessee Martin": "TN Martin",
+    "Texas A&M Corpus Chris": "TAM C. Christi",
     # ("Penn" → Kaggle "Penn" now resolves by exact match; the old "Penn"→"Pennsylvania"
     #  override pointed at a non-existent Kaggle team and is removed.)
 }
@@ -50,18 +61,30 @@ _NAME_OVERRIDES: dict[str, str] = {
 _MATCH_THRESHOLD = 0.85
 
 
+def _norm_spelling(s: str) -> str:
+    """Normalize a team-name spelling for matching: lowercase, drop periods, collapse spaces."""
+    return " ".join(str(s).lower().replace(".", "").split())
+
+
 def build_team_name_map(
     mteams_df: pd.DataFrame,
     kenpom_teams_df: pd.DataFrame,
+    team_spellings_df: pd.DataFrame | None = None,
 ) -> dict[str, int]:
     """Build a mapping from KenPom team name to Kaggle TeamID.
 
-    Applies manual overrides first, then exact match, then fuzzy match
-    (SequenceMatcher threshold=0.85). Logs unmatched teams as warnings.
+    Applies manual overrides first, then exact match, then Kaggle's official name-variant table
+    (``MTeamSpellings.csv``, normalized), then fuzzy match (SequenceMatcher threshold=0.85).
+    Logs unmatched teams as warnings.
+
+    The spellings step is what lifts mid-major recall (Kaggle abbreviates — "Abilene Chr",
+    "Coastal Car" — below the fuzzy threshold); ``MTeamSpellings`` is Kaggle's own table built for
+    exactly this, so it's the canonical bridge, not a heuristic. ~84%→~97% of KenPom teams map.
 
     Args:
         mteams_df: Kaggle MTeams.csv DataFrame — needs TeamID and TeamName columns.
         kenpom_teams_df: DataFrame from KenPomClient.teams() for any season.
+        team_spellings_df: Optional Kaggle MTeamSpellings.csv (TeamNameSpelling, TeamID).
 
     Returns:
         dict mapping KenPom team name → Kaggle TeamID.
@@ -69,6 +92,13 @@ def build_team_name_map(
     kaggle_names: dict[str, int] = dict(zip(mteams_df["TeamName"], mteams_df["TeamID"]))
     kaggle_name_list = list(kaggle_names.keys())
     kp_name_col = _team_name_col(kenpom_teams_df)
+
+    spellings: dict[str, int] = {}
+    if team_spellings_df is not None and len(team_spellings_df):
+        spellings = {
+            _norm_spelling(k): int(v)
+            for k, v in zip(team_spellings_df["TeamNameSpelling"], team_spellings_df["TeamID"])
+        }
 
     result: dict[str, int] = {}
     unmatched: list[str] = []
@@ -78,6 +108,11 @@ def build_team_name_map(
 
         if canonical in kaggle_names:
             result[kp_name] = kaggle_names[canonical]
+            continue
+
+        sid = spellings.get(_norm_spelling(kp_name)) or spellings.get(_norm_spelling(canonical))
+        if sid is not None:
+            result[kp_name] = sid
             continue
 
         matches = difflib.get_close_matches(canonical, kaggle_name_list, n=1, cutoff=_MATCH_THRESHOLD)

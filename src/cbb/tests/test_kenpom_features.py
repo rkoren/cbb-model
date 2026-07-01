@@ -70,6 +70,38 @@ def test_unmatched_team_excluded_from_map():
     assert "NoSuchTeamXYZ" not in result
 
 
+def _spellings(*pairs) -> pd.DataFrame:
+    return pd.DataFrame(
+        {"TeamNameSpelling": [p[0] for p in pairs], "TeamID": [p[1] for p in pairs]}
+    )
+
+
+def test_spellings_recovers_abbreviated_mid_major():
+    # Kaggle abbreviates "Abilene Chr" — too short for the 0.85 fuzzy. The spellings table
+    # (Kaggle's own variant list) bridges it where exact + fuzzy both fail.
+    kaggle = _kaggle_teams("Abilene Chr")  # TeamID 1001
+    kenpom = _kenpom_teams("Abilene Christian")
+    assert "Abilene Christian" not in build_team_name_map(kaggle, kenpom)  # fuzzy-only misses it
+    spell = _spellings(("Abilene Christian", 1001))
+    assert build_team_name_map(kaggle, kenpom, spell)["Abilene Christian"] == 1001
+
+
+def test_spellings_normalization_ignores_punctuation():
+    # "Cal St. Bakersfield" vs a spelling "cal st bakersfield" — _norm_spelling strips the period.
+    kaggle = _kaggle_teams("CS Bakersfield")  # 1001
+    kenpom = _kenpom_teams("Cal St. Bakersfield")
+    spell = _spellings(("cal st bakersfield", 1001))
+    assert build_team_name_map(kaggle, kenpom, spell)["Cal St. Bakersfield"] == 1001
+
+
+def test_spellings_precedence_exact_beats_spellings():
+    # An exact Kaggle name wins before the spellings table is consulted.
+    kaggle = _kaggle_teams("Duke")  # 1001
+    kenpom = _kenpom_teams("Duke")
+    spell = _spellings(("duke", 9999))  # wrong id — must NOT be used since exact matched
+    assert build_team_name_map(kaggle, kenpom, spell)["Duke"] == 1001
+
+
 # ── load_kenpom_efficiency ────────────────────────────────────────────────────
 
 def _write_kenpom_parquet(path: Path, teams: list[str], **cols) -> None:
