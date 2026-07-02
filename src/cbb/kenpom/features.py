@@ -169,6 +169,40 @@ def load_kenpom_efficiency(
     return df[["Season", "men_women", "TeamID"] + eff_cols].reset_index(drop=True)
 
 
+def load_selection_sunday_efficiency(
+    season: int,
+    archive_parquet_path: Path,
+    team_name_map: dict[str, int],
+) -> pd.DataFrame:
+    """Leak-free efficiency for the tournament model: the last pre-tournament archive snapshot (KP-005).
+
+    The cached ``kenpom_ratings_{season}.parquet`` holds **end-of-season (post-tournament)** ratings
+    (== archive ``AdjEMFinal``), so overlaying them leaks the tournament (a team's tourney run inflates
+    the rating we then use to predict that run). Instead take each team's **latest archive snapshot**
+    (the weekly as-of series tops out at ~Selection Sunday — GM-002; the preseason row, stamped
+    ``DayZero−1``, is the earliest so ``max(ArchiveDate)`` excludes it) — the leak-free as-of rating.
+
+    Same return shape as :func:`load_kenpom_efficiency`. Empty frame if the archive is absent
+    (pre-2012 seasons → caller falls back to manual efficiency, which is also leak-free).
+    """
+    if not Path(archive_parquet_path).exists():
+        return pd.DataFrame(columns=["Season", "men_women", "TeamID", *_KP_EFFICIENCY_COLS])
+    df = pd.read_parquet(archive_parquet_path)
+    eff_cols = [c for c in _KP_EFFICIENCY_COLS if c in df.columns]
+    if not eff_cols:
+        return pd.DataFrame(columns=["Season", "men_women", "TeamID", *_KP_EFFICIENCY_COLS])
+    df = df.copy()
+    df["ArchiveDate"] = pd.to_datetime(df["ArchiveDate"])
+    # latest snapshot per team = as-of Selection Sunday (leak-free)
+    df = df.sort_values("ArchiveDate").groupby(_team_name_col(df), as_index=False).last()
+    df["TeamID"] = df[_team_name_col(df)].map(team_name_map)
+    df = df.dropna(subset=["TeamID"])
+    df["TeamID"] = df["TeamID"].astype(int)
+    df["Season"] = season
+    df["men_women"] = 0
+    return df[["Season", "men_women", "TeamID"] + eff_cols].reset_index(drop=True)
+
+
 def merge_kenpom_efficiency(
     adj_eff_df: pd.DataFrame,
     kenpom_eff_df: pd.DataFrame,

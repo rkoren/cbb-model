@@ -10,6 +10,7 @@ import pytest
 from cbb.kenpom.features import (
     build_team_name_map,
     load_kenpom_efficiency,
+    load_selection_sunday_efficiency,
     merge_kenpom_efficiency,
 )
 
@@ -145,6 +146,28 @@ def test_load_raises_on_missing_efficiency_cols(tmp_path):
     pd.DataFrame({"TeamName": ["Duke"], "SomeOtherCol": [1.0]}).to_parquet(p)
     with pytest.raises(ValueError, match="efficiency columns"):
         load_kenpom_efficiency(2024, p, {"Duke": 1001})
+
+
+# ── load_selection_sunday_efficiency (KP-005 leak fix) ──────────────────────────
+
+def test_selection_sunday_takes_latest_snapshot(tmp_path):
+    # Archive with a preseason row (earliest) + two weekly snapshots; must take the LATEST
+    # (Selection-Sunday) AdjEM — never the preseason or an early-season value.
+    p = tmp_path / "kenpom_archive_2025.parquet"
+    pd.DataFrame({
+        "ArchiveDate": ["2024-11-02", "2025-01-15", "2025-03-10"],  # preseason, mid, latest
+        "TeamName": ["Duke", "Duke", "Duke"],
+        "AdjOE": [110.0, 118.0, 122.0], "AdjDE": [95.0, 90.0, 88.0],
+        "AdjEM": [15.0, 28.0, 34.0], "AdjTempo": [68.0, 67.0, 67.0],
+    }).to_parquet(p, index=False)
+    out = load_selection_sunday_efficiency(2025, p, {"Duke": 1001})
+    assert len(out) == 1
+    assert out.iloc[0]["AdjEM"] == 34.0  # the 2025-03-10 snapshot, not preseason 15 or mid 28
+
+
+def test_selection_sunday_absent_archive_returns_empty(tmp_path):
+    out = load_selection_sunday_efficiency(2011, tmp_path / "kenpom_archive_2011.parquet", {"Duke": 1001})
+    assert len(out) == 0  # pre-2012: no archive → caller keeps manual (leak-free) efficiency
 
 
 # ── merge_kenpom_efficiency ───────────────────────────────────────────────────

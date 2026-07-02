@@ -38,7 +38,7 @@ from cbb.features import (
 from cbb.features.reg_games import build_reg_games
 from cbb.kenpom.features import (
     build_team_name_map,
-    load_kenpom_efficiency,
+    load_selection_sunday_efficiency,
     merge_kenpom_efficiency,
 )
 from cbb.kenpom.rich_features import build_kenpom_rich_features, join_kenpom_rich
@@ -125,18 +125,25 @@ def _apply_kenpom(
                 continue
 
             try:
-                kenpom_eff = load_kenpom_efficiency(s, ratings_path, team_map)
-                adj_eff = merge_kenpom_efficiency(adj_eff, kenpom_eff)
-                merged += 1
+                # KP-005: leak-free efficiency from the Selection-Sunday archive, NOT the cached
+                # end-of-season `ratings` (which == AdjEMFinal → leaks the tournament). Empty for
+                # pre-2012 seasons (no archive) → manual efficiency kept, also leak-free.
+                archive_path = kenpom_dir / "archive" / f"kenpom_archive_{s}.parquet"
+                kenpom_eff = load_selection_sunday_efficiency(s, archive_path, team_map)
+                if len(kenpom_eff):
+                    adj_eff = merge_kenpom_efficiency(adj_eff, kenpom_eff)
+                    merged += 1
             except Exception as exc:  # noqa: BLE001
                 log.warning("KenPom efficiency merge failed for season %d: %s", s, exc)
 
             try:
-                ratings_df = pd.read_parquet(ratings_path)
+                # KP-005: rich ratings-extras (SOS/Luck/APL) come only from the end-of-season
+                # `ratings` file and have no leak-free as-of source (the archive lacks them) → drop
+                # them (pass ratings_df=None). Height stays (roster-based, y=year, negligible leak).
                 height_path = kenpom_dir / f"kenpom_height_{s}.parquet"
                 height_df = pd.read_parquet(height_path) if height_path.exists() else None
                 kp_frames.append(
-                    build_kenpom_rich_features(s, team_map, ratings_df, height_df)
+                    build_kenpom_rich_features(s, team_map, ratings_df=None, height_df=height_df)
                 )
             except Exception as exc:  # noqa: BLE001
                 log.warning("KenPom rich features failed for season %d: %s", s, exc)
