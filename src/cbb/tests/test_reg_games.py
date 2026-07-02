@@ -5,6 +5,7 @@ strictly-earlier games — and (2) **A/B symmetry** — each game yields a winne
 loser-as-A row with consistently oriented Margin/venue.
 """
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -134,6 +135,36 @@ def test_prior_season_priors_joined():
     assert win_row["d_AdjEM_prev"] == pytest.approx(15.0)
     # Total head sum: AdjTempo 68 + 70 = 138.
     assert win_row["s_AdjTempo_prev"] == pytest.approx(138.0)
+
+
+def test_blend_maturity_weighting():
+    from cbb.features.reg_games import _add_blend
+    # `_add_blend` prepends A_/B_ to the base names — so columns are A_net/A_pri, etc.
+    g = pd.DataFrame({
+        "A_net": [10.0, 10.0, 10.0, np.nan], "A_pri": [2.0, 2.0, np.nan, 2.0],
+        "A_games_asof": [0, 8, 4, 4],
+        "B_net": [0.0, 0.0, 0.0, 0.0], "B_pri": [0.0, 0.0, 0.0, 0.0], "B_games_asof": [8, 8, 8, 8],
+    })
+    _add_blend(g, asof="net", prior="pri", out="blend", k=8.0)
+    # row0: games 0 → w=0 → full prior (2.0); row1: games 8 → w=1 → full as-of (10.0)
+    assert g.loc[0, "A_blend"] == pytest.approx(2.0)
+    assert g.loc[1, "A_blend"] == pytest.approx(10.0)
+    # row2: games 4, prior NaN → w=1 → full as-of (10.0); row3: as-of NaN → w=0 → full prior (2.0)
+    assert g.loc[2, "A_blend"] == pytest.approx(10.0)
+    assert g.loc[3, "A_blend"] == pytest.approx(2.0)
+
+
+def test_games_played_before_counts_priors():
+    from cbb.features.reg_games import _games_played_before
+    raw = pd.DataFrame({
+        "Season": [2020, 2020, 2020], "DayNum": [5, 10, 15],
+        "WTeamID": [1101, 1101, 1102], "LTeamID": [1102, 1103, 1103],
+    })
+    w, l = _games_played_before(raw)
+    # W side: 1101 g1→0, 1101 g2→1, 1102 g3→1 (played g1 before). L side: 1102 g1→0, 1103 g2→0,
+    # 1103 g3→1 (played g2 before).
+    assert list(w) == [0, 1, 1]
+    assert list(l) == [0, 0, 1]
 
 
 def test_d_elo_pre_present_and_antisymmetric():

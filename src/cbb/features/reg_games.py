@@ -31,6 +31,26 @@ import pandas as pd
 _PRIOR_BASES = ["AdjOE", "AdjDE", "AdjEM", "AdjTempo"]
 
 
+def _games_played_before(reg_raw: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
+    """Per raw game, the count of prior games each team (W, L) has played that season (WM-004).
+
+    A maturity signal for the prior→as-of blend: early season → few games → lean on the
+    prior-season prior; as games accumulate → lean on the within-season rating.
+    """
+    n = len(reg_raw)
+    long = pd.DataFrame({
+        "Season": np.concatenate([reg_raw["Season"].to_numpy(), reg_raw["Season"].to_numpy()]),
+        "DayNum": np.concatenate([reg_raw["DayNum"].to_numpy(), reg_raw["DayNum"].to_numpy()]),
+        "team": np.concatenate([reg_raw["WTeamID"].to_numpy(), reg_raw["LTeamID"].to_numpy()]),
+        "gi": np.concatenate([np.arange(n), np.arange(n)]),
+        "side": np.array(["W"] * n + ["L"] * n),
+    }).sort_values(["Season", "DayNum"], kind="stable")
+    long["gp"] = long.groupby(["Season", "team"]).cumcount()
+    w = long[long["side"] == "W"].set_index("gi")["gp"].reindex(range(n)).to_numpy()
+    l = long[long["side"] == "L"].set_index("gi")["gp"].reindex(range(n)).to_numpy()
+    return w, l
+
+
 def _home_sign(wloc: pd.Series, a_is_winner: bool) -> np.ndarray:
     """Venue from the winner's WLoc, oriented to team A. +1 A home, -1 A away, 0 neutral."""
     # WLoc is the *winner's* location. If A is the winner, A_home follows WLoc directly;
@@ -86,6 +106,8 @@ def build_reg_game_dataset(
             [f"W_{f}" for f in bs_feats] + [f"L_{f}" for f in bs_feats]
         g = g.merge(rolling[keep], on=["Season", "DayNum", "WTeamID", "LTeamID"], how="left")
 
+    g["W_games_asof"], g["L_games_asof"] = _games_played_before(reg_raw)  # WM-004 maturity signal
+
     margin = (g["WScore"] - g["LScore"]).to_numpy(dtype=float)
     total = (g["WScore"] + g["LScore"]).to_numpy(dtype=float)
 
@@ -104,6 +126,8 @@ def build_reg_game_dataset(
             "A_home": _home_sign(g["WLoc"], a_is_winner),
             "A_Elo_pre": g[f"{win}_Elo_pre"].to_numpy(),
             "B_Elo_pre": g[f"{los}_Elo_pre"].to_numpy(),
+            "A_games_asof": g[f"{win}_games_asof"].to_numpy(),
+            "B_games_asof": g[f"{los}_games_asof"].to_numpy(),
         })
         for b in prior_bases:
             rec[f"A_{b}_prev"] = g[f"{win}_{b}_prev"].to_numpy()
@@ -125,7 +149,30 @@ def build_reg_game_dataset(
     for f in bs_feats:  # GM-003: d_ margin (net eff), s_ total (pace × scoring level)
         games[f"d_{f}"] = games[f"A_{f}"] - games[f"B_{f}"]
         games[f"s_{f}"] = games[f"A_{f}"] + games[f"B_{f}"]  # NaN propagates (same reason as *_prev)
+
+    # WM-004: maturity-weighted prior→as-of blend — leans on the prior-season prior early (few games)
+    # and the within-season rating as games accumulate. Matches WM-002's early-season signal (corr
+    # 0.71) at a fraction of the cost. Only when both components are present (rolling built).
+    if "bs_NetEff_asof" in bs_feats and "AdjEM" in prior_bases:
+        _add_blend(games, asof="bs_NetEff_asof", prior="AdjEM_prev", out="blend_NetEff_asof")
     return games
+
+
+def _add_blend(games: pd.DataFrame, asof: str, prior: str, out: str, k: float = 8.0) -> None:
+    """Add ``d_<out>`` = A/B maturity-weighted blend of within-season ``asof`` and prior-season ``prior``.
+
+    Weight ``w = min(games/k, 1)`` on the as-of; ``w=0`` when the as-of is missing (full prior),
+    ``w=1`` when the prior is missing (full as-of, e.g. first-season teams).
+    """
+    for side in ("A", "B"):
+        a = games[f"{side}_{asof}"]
+        p = games[f"{side}_{prior}"]
+        gp = games[f"{side}_games_asof"].to_numpy(dtype=float)
+        w = np.minimum(gp / k, 1.0)
+        w = np.where(a.notna().to_numpy(), w, 0.0)
+        w = np.where(p.isna().to_numpy() & a.notna().to_numpy(), 1.0, w)
+        games[f"{side}_{out}"] = w * a.fillna(0).to_numpy() + (1 - w) * p.fillna(0).to_numpy()
+    games[f"d_{out}"] = games[f"A_{out}"] - games[f"B_{out}"]
 
 
 def build_reg_games(
