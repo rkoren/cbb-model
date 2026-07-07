@@ -24,6 +24,8 @@ def _ratings(*names) -> pd.DataFrame:
 
 def _height(*names) -> pd.DataFrame:
     n = len(names)
+    # The endpoint also returns Exp/Bench/Continuity; KP-006 leaves them unmapped (leaky), so
+    # they're kept here to prove build_kenpom_rich_features ignores unmapped source columns.
     return pd.DataFrame({
         "TeamName": list(names),
         "AvgHgt": [77.0 + i for i in range(n)], "HgtEff": [78.0] * n,
@@ -52,6 +54,9 @@ def test_height_only_when_no_ratings():
     result = build_kenpom_rich_features(2024, {"Duke": 1001}, None, _height("Duke"))
     assert "kp_AvgHgt" in result.columns
     assert "kp_SOS" not in result.columns
+    # KP-006: the minutes-weighted (leaky) height columns are not mapped, even though the
+    # source frame supplies them.
+    assert {"kp_Exp", "kp_Bench", "kp_Continuity"}.isdisjoint(result.columns)
 
 
 def test_empty_when_no_sources():

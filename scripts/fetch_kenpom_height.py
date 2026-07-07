@@ -1,8 +1,9 @@
 """Fetch + cache KenPom height data per season (KP-002).
 
 Writes data/processed/kenpom_height_{season}.parquet for each season that has cached
-kenpom_ratings (the features pipeline's `_apply_kenpom` picks them up automatically →
-kp_AvgHgt/HgtEff/Exp/Bench/Continuity). Best-effort: skips a season whose fetch fails or
+kenpom_ratings (the features pipeline's `_apply_kenpom` picks them up automatically → the
+leak-free kp_AvgHgt/HgtEff features; the endpoint's minutes-weighted Exp/Bench/Continuity
+are cached but left unmapped per KP-006). Best-effort: skips a season whose fetch fails or
 is already cached. DVC-track the outputs afterward so CI doesn't re-fetch.
 
     python scripts/fetch_kenpom_height.py

@@ -123,7 +123,7 @@ evaluate:
 # features stage; absent until the 2026 results are dropped in → the platform no-ops.
 # `predict_method: predict_batch` is CBBModel's custom predict surface. `features` is omitted
 # on purpose: it defaults to `feature_candidates`, which `--variant` keeps in sync with the
-# model actually being trained (a baseline run scores its 48 features, kenpom_rich its 57).
+# model actually being trained (a baseline run scores its 48 features, kenpom_rich its 54).
 holdout:
   path: data/processed/holdout_2026.parquet
   label: Outcome
@@ -138,8 +138,9 @@ variants:
     model:
       variant: kenpom_rich     # so the run's model_variant tag matches (leaderboard/diff)
     feature_candidates:
+      # KP-006 dropped d_kp_Exp/d_kp_Bench/d_kp_Continuity (minutes-weighted → leaky).
       add: [d_kp_APL_Def, d_kp_APL_Off, d_kp_Luck, d_kp_SOS,
-            d_kp_AvgHgt, d_kp_HgtEff, d_kp_Exp, d_kp_Bench, d_kp_Continuity]
+            d_kp_AvgHgt, d_kp_HgtEff]
   # GM-001b: trains the *parallel* regular-season game-level model (own `cbb-reg-model` champion).
   # The target switch in src/train/run.py loads reg_games.parquet and trains margin+total+calibrator.
   #   kitchen run train --variant reg_season --auto-promote \
