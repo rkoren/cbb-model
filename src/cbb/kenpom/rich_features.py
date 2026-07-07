@@ -3,8 +3,9 @@
 Phase 1 leads with the signal the manually-computed ``season_avgs`` genuinely lacks, and
 that is *leak-safe* against a tournament-outcome label:
 
-  - **Height endpoint** — ``AvgHgt, HgtEff, Exp, Bench, Continuity``. Roster-shaped, so
-    postseason games barely move them; ``season_avgs`` has nothing like them.
+  - **Height endpoint** — ``AvgHgt, HgtEff`` (roster-based, leak-free). ``season_avgs`` has
+    nothing like them. The endpoint's ``Exp/Bench/Continuity`` are *minutes/game-weighted*, so
+    they absorb tournament games (a backdoor label leak) and are excluded (KP-006).
   - **Ratings extras** — ``SOS, Luck, APL_Off, APL_Def``. Already present in the cached
     ``kenpom_ratings_{season}.parquet`` (baseline only reads AdjOE/AdjDE/AdjEM/AdjTempo from
     it), so these cost zero extra API calls and are leak-consistent with baseline's existing
@@ -34,12 +35,14 @@ log = logging.getLogger(__name__)
 
 # Source KenPom column -> kp_ prefixed feature name. Only columns actually present in the
 # fetched frame are used; missing ones are logged and skipped (KenPom schema can drift).
+#
+# KP-006: only the *roster-based* height columns are mapped. ``Exp``/``Bench``/``Continuity``
+# are minutes/game-weighted on the `height` endpoint (`y=year`, end-of-season), so a team that
+# played 6 tournament games carries a different value than a round-1 exit — a backdoor
+# tournament-label leak. ``AvgHgt``/``HgtEff`` are roster-shaped and leak-free, so they stay.
 HEIGHT_COLS: dict[str, str] = {
     "AvgHgt": "kp_AvgHgt",
     "HgtEff": "kp_HgtEff",
-    "Exp": "kp_Exp",
-    "Bench": "kp_Bench",
-    "Continuity": "kp_Continuity",
 }
 
 RATINGS_EXTRA_COLS: dict[str, str] = {

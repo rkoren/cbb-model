@@ -4,7 +4,8 @@ Adds one feature group on top of the baseline (experiments/baseline.py): KenPom 
 attributes that the manually-computed season_avgs genuinely lacks and that don't leak the
 tournament label —
 
-  - height endpoint: kp_AvgHgt, kp_HgtEff, kp_Exp, kp_Bench, kp_Continuity (roster-shaped)
+  - height endpoint: kp_AvgHgt, kp_HgtEff (roster-based, leak-free; the minutes-weighted
+    kp_Exp/kp_Bench/kp_Continuity were dropped in KP-006 as a backdoor tournament-label leak)
   - ratings extras already cached but unused: kp_SOS, kp_Luck, kp_APL_Off, kp_APL_Def
 
 Deliberately excludes four-factors / misc-stats / pointdist: those endpoints take only
@@ -247,7 +248,8 @@ def kenpom_rich_pipeline(
         "d_opp_pct_pts_3", "d_opp_pct_pts_2", "d_opp_pct_pts_ft",
         "d_quality_wtd_margin",
         # ── KenPom-rich additions (differentials only; A_/B_ available if wanted) ──
-        "d_kp_AvgHgt", "d_kp_HgtEff", "d_kp_Exp", "d_kp_Bench", "d_kp_Continuity",
+        # KP-006 dropped the minutes-weighted kp_Exp/kp_Bench/kp_Continuity (leaky).
+        "d_kp_AvgHgt", "d_kp_HgtEff",
         "d_kp_SOS", "d_kp_Luck", "d_kp_APL_Off", "d_kp_APL_Def",
     ]
     features = [f for f in feature_candidates if f in matchups.columns]
