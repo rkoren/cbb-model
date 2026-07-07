@@ -28,14 +28,18 @@ from cbb.kenpom.asof_features import ARCHIVE_FIRST_SEASON, ASOF_COLS  # noqa: E4
 ARCHIVE_DIR = Path("data/kenpom/archive")
 KEEP = ["ArchiveDate", "TeamName", *ASOF_COLS]   # non-Final only — the rest leak
 
-# Weekly snapshots across the regular season: DayZero is early November, Selection Sunday ~DayNum 133.
-FIRST_DAYNUM, LAST_DAYNUM, STEP = 14, 133, 7
+# Weekly snapshots across the regular season: DayZero is early November, Selection Sunday ~DayNum 132.
+FIRST_DAYNUM, LAST_DAYNUM, STEP = 14, 126, 7
+# KP-007: the Selection-Sunday window — fetch each day so late-season + tournament games get the
+# freshest pre-tournament rating (the weekly cadence otherwise tops out ~a week early). merge_asof /
+# load_selection_sunday_efficiency take the latest existing snapshot; missing dates 404 harmlessly.
+SEL_SUNDAY_WINDOW = range(127, 134)
 
 
 def _snapshot_dates(season: int, dayzero: pd.Timestamp) -> list[str]:
     today = pd.Timestamp.today().normalize()
     dates = []
-    for d in range(FIRST_DAYNUM, LAST_DAYNUM + 1, STEP):
+    for d in [*range(FIRST_DAYNUM, LAST_DAYNUM + 1, STEP), *SEL_SUNDAY_WINDOW]:
         dt = dayzero + pd.Timedelta(days=d)
         if dt <= today:                       # can't fetch future snapshots
             dates.append(dt.strftime("%Y-%m-%d"))

@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import pickle
 import sys
 import tempfile
@@ -97,8 +96,6 @@ def cbb_submit_flow(
     log.info("Model variant: %s  season: %d", variant, season)
 
     with tempfile.TemporaryDirectory() as tmp:
-        tmp_path = Path(tmp)
-
         run_meta_dir = Path(mlflow.artifacts.download_artifacts(
             run_id=run_id, artifact_path="run_meta", dst_path=tmp,
         ))

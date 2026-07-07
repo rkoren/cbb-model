@@ -1,7 +1,6 @@
 """Tests for cbb.kenpom.features."""
 
 import logging
-import tempfile
 from pathlib import Path
 
 import pandas as pd

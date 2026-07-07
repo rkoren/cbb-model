@@ -14,11 +14,9 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import pickle
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
 
@@ -355,11 +353,23 @@ def build(params: dict, store: DataStore) -> None:
     # leakage). Best-effort so a failure here never blocks the Kaggle features build. Season
     # 2026 is left in the frame but excluded from training as the trusted reg-season holdout.
     try:
-        # As-of-date KenPom (GM-002): load cached weekly archive snapshots (men's, 2012+) and the
-        # Season→DayZero map; best-effort — absent snapshots make the join a no-op (Elo+priors only).
-        asof_snaps, torvik_women, dayzero = _load_asof_inputs(seasons, team_maps, store)
-        reg_games = build_reg_games(data, adj_eff, asof_snapshots=asof_snaps,
-                                    dayzero_by_season=dayzero, torvik_women_snapshots=torvik_women)
+        from cbb.features.adjself_asof import compute_adjself_asof_snapshots  # noqa: PLC0415
+
+        # As-of-date inputs: KenPom archive (men, 2012+), Torvik women, and the Season→DayZero map;
+        # best-effort — absent snapshots make a join a no-op (Elo + priors only).
+        # `_asof_snaps` = KenPom archive snapshots — intentionally NOT fed to the model (WM-002/B,
+        # below); the underscore marks it unused here. It stays on disk (data/kenpom/archive/) for
+        # the M6 dashboard's ours-vs-KenPom comparison. DASH-001 will consume it.
+        _asof_snaps, torvik_women, dayzero = _load_asof_inputs(seasons, team_maps, store)
+
+        # WM-002 (independence): self-computed weekly as-of efficiency is the reg model's within-season
+        # strength signal — both genders, every season — replacing KenPom's kp_*_asof.
+        adjself_snaps = compute_adjself_asof_snapshots(reg_sym, dayzero)
+        store.save_parquet(adjself_snaps, "adjself_asof.parquet")
+
+        reg_games = build_reg_games(data, adj_eff, asof_snapshots=None,
+                                    dayzero_by_season=dayzero, torvik_women_snapshots=torvik_women,
+                                    adjself_snapshots=adjself_snaps)
         store.save_parquet(reg_games, "reg_games.parquet")
         log.info(
             "Reg-season game dataset → %s  (%d rows, %d cols, seasons %d-%d)",

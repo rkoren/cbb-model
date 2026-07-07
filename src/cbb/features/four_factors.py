@@ -1,6 +1,5 @@
 """Season box-score averages and Four Factors for offense and defense."""
 
-import numpy as np
 import pandas as pd
 
 _FT_FACTOR = 0.475

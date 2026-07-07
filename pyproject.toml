@@ -41,3 +41,18 @@ packages = ["src/cbb"]
 [tool.pytest.ini_options]
 testpaths = ["src/cbb/tests"]
 asyncio_mode = "auto"
+
+[tool.ruff.lint]
+# Ruff adopted on an existing codebase: keep the default E/F rules (which catch real dead
+# code via F401/F841), but tolerate a handful of deliberate patterns rather than rewrite
+# working code to satisfy the linter.
+ignore = [
+    "E741",  # ambiguous name `l` — a settled convention in the stats / rating code
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Scripts and flows deliberately run setup before their imports (load_dotenv() /
+# warnings.filterwarnings() must precede the imports they affect), and throwaway
+# harness scripts use one-line semicolon statements.
+"flows/*.py" = ["E402"]
+"scripts/*.py" = ["E402", "E702"]

@@ -137,6 +137,23 @@ def test_prior_season_priors_joined():
     assert win_row["s_AdjTempo_prev"] == pytest.approx(138.0)
 
 
+def test_exptotal_pace_times_efficiency():
+    from cbb.features.reg_games import _add_exptotal
+    # Two even teams (all ratings at league avg 105 OE / 105 DE / 68 tempo) → exptot ≈ pace × 2·(avg).
+    g = pd.DataFrame({
+        "Season": [2026, 2026], "men_women": [0, 0],
+        "A_kp_AdjOE_asof": [110.0, 100.0], "B_kp_AdjOE_asof": [100.0, 100.0],
+        "A_kp_AdjDE_asof": [100.0, 100.0], "B_kp_AdjDE_asof": [100.0, 100.0],
+        "A_kp_AdjTempo_asof": [70.0, 70.0], "B_kp_AdjTempo_asof": [70.0, 70.0],
+    })
+    _add_exptotal(g)
+    assert "s_exptot_kp_asof" in g.columns
+    # game 0: pace 70, lg_OE = mean(110,100)=105; exptot = 70/100·(110·100 + 100·100)/105
+    assert g.loc[0, "s_exptot_kp_asof"] == pytest.approx(70 / 100 * (110 * 100 + 100 * 100) / 105)
+    # a stronger-offense team (game 0, A_OE 110) → higher total than the all-even game 1
+    assert g.loc[0, "s_exptot_kp_asof"] > g.loc[1, "s_exptot_kp_asof"]
+
+
 def test_blend_maturity_weighting():
     from cbb.features.reg_games import _add_blend
     # `_add_blend` prepends A_/B_ to the base names — so columns are A_net/A_pri, etc.

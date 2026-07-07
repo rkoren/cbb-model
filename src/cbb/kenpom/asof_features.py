@@ -20,7 +20,6 @@ back on pre-game Elo + prior-season priors. Additive to the ``*_prev`` priors, n
 
 from __future__ import annotations
 
-import glob
 import logging
 from pathlib import Path
 

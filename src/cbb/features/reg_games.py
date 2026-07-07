@@ -181,6 +181,7 @@ def build_reg_games(
     asof_snapshots: pd.DataFrame | None = None,
     dayzero_by_season: dict | None = None,
     torvik_women_snapshots: pd.DataFrame | None = None,
+    adjself_snapshots: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Build the combined men's + women's regular-season game-level dataset.
 
@@ -189,9 +190,14 @@ def build_reg_games(
         adj_eff: Output of :func:`compute_adj_efficiency` (all seasons, both genders).
         asof_snapshots: Optional long frame of as-of-date KenPom snapshots (GM-002), from
             :func:`cbb.kenpom.asof_features.load_all_archive_snapshots`. When given (with
-            ``dayzero_by_season``), within-season ``*_kp_*_asof`` features are joined in.
+            ``dayzero_by_season``), within-season ``*_kp_*_asof`` features are joined in. As of
+            WM-002 the reg pipeline passes ``None`` here (KenPom dropped from the model in favour of
+            the self-computed ``adjself_*_asof``); the plumbing stays for ad-hoc comparison.
         dayzero_by_season: ``Season → DayZero`` (from ``MSeasons``), to turn ``DayNum`` into a
-            calendar date for the as-of join. Required alongside ``asof_snapshots``.
+            calendar date for the as-of join. Required alongside any as-of snapshots.
+        adjself_snapshots: Optional long frame of *self-computed* weekly as-of efficiency snapshots
+            (WM-002), from :func:`cbb.features.adjself_asof.compute_adjself_asof_snapshots`. Joined
+            as ``*_adjself_*_asof`` — the reg model's within-season strength signal (both genders).
 
     Returns:
         Concatenated symmetric reg-season game dataset (see :func:`build_reg_game_dataset`).
@@ -202,7 +208,10 @@ def build_reg_games(
     parts = []
     for key, mw in (("M_reg_raw", 0), ("W_reg_raw", 1)):
         reg_raw = data[key]
-        pregame = compute_pregame_elo(reg_raw, men_women_flag=mw)
+        # k=60/carry=0.9 tuned for reg-season pre-game Elo (vs the tournament Elo's k=100/carry=0.75):
+        # less-aggressive updates + higher season carryover (college teams are consistent year-to-year)
+        # → best corr(margin) for both genders.
+        pregame = compute_pregame_elo(reg_raw, men_women_flag=mw, k_factor=60.0, carry=0.9)
         rolling = compute_rolling_boxscore(reg_raw, men_women_flag=mw)  # GM-003: as-of box-score, both genders
         parts.append(build_reg_game_dataset(reg_raw, pregame, adj_eff, men_women=mw, rolling=rolling))
     games = pd.concat(parts, ignore_index=True)
@@ -214,9 +223,39 @@ def build_reg_games(
 
         from cbb.kenpom.asof_features import add_asof_features  # noqa: PLC0415
         log = logging.getLogger(__name__)
-        for label, snaps in (("KenPom", asof_snapshots), ("Torvik-women", torvik_women_snapshots)):
+        for label, snaps in (("KenPom", asof_snapshots), ("Torvik-women", torvik_women_snapshots),
+                             ("adjself", adjself_snapshots)):
             if snaps is not None and len(snaps):
                 games, added = add_asof_features(games, snaps, dayzero_by_season)
                 if added:
                     log.info("As-of %s features joined into reg_games: %d cols", label, len(added))
+
+    _add_exptotal(games)  # totals are multiplicative (pace × efficiency), not additive sums
     return games
+
+
+# Rating sources → (OE, DE, Tempo) as-of column bases for the pace×efficiency total.
+_EXPTOT_SOURCES = {
+    "bs": ("bs_OE_asof", "bs_DE_asof", "bs_Tempo_asof"),
+    "kp": ("kp_AdjOE_asof", "kp_AdjDE_asof", "kp_AdjTempo_asof"),
+    "tv": ("tv_AdjOE_asof", "tv_AdjDE_asof", "tv_AdjTempo_asof"),
+    "adjself": ("adjself_AdjOE_asof", "adjself_AdjDE_asof", "adjself_AdjTempo_asof"),
+}
+
+
+def _add_exptotal(games: pd.DataFrame) -> None:
+    """Add ``s_exptot_<src>_asof`` — an explicit **pace × opponent-adjusted efficiency** game total.
+
+    The total head otherwise sees only additive sums (``s_OE + s_DE + s_Tempo``), but a game's total
+    is multiplicative: ``pace × (A's PPP vs B's D + B's PPP vs A's D)``. Giving the head this product
+    directly closes the total gap to FanMatch (men 14.0→13.8 ≈ FanMatch's 13.8). One per rating
+    source; the head picks the best available (kp men / tv women / bs everywhere).
+    """
+    for src, (o, d, t) in _EXPTOT_SOURCES.items():
+        if f"A_{o}" not in games.columns:
+            continue
+        aO, bO = games[f"A_{o}"], games[f"B_{o}"]
+        aD, bD = games[f"A_{d}"], games[f"B_{d}"]
+        pace = (games[f"A_{t}"] + games[f"B_{t}"]) / 2.0
+        lg_oe = games.groupby(["Season", "men_women"])[f"A_{o}"].transform("mean")
+        games[f"s_exptot_{src}_asof"] = pace / 100.0 * (aO * bD + bO * aD) / lg_oe

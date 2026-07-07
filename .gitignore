@@ -34,3 +34,4 @@ infra/tf/
 # claude
 CLAUDE.md
 AGENTS.md
+.claude

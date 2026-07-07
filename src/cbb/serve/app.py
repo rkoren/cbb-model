@@ -20,7 +20,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from cbb.kenpom import KenPomClient
-from cbb.train.model import ModelConfig, predict
+from cbb.train.model import predict
 
 log = logging.getLogger(__name__)
 
