@@ -86,11 +86,23 @@ class RegModel:
         return _margin_to_prob(self.calibrator, m)
 
 
+# Identity columns carried through the predictions log (DASH-001a) so the downstream matcher
+# (DASH-001b) can key on the unordered team-pair + date. Threaded through only when present, so
+# synthetic frames without them still train/score.
+_ID_COLS = ["men_women", "DayNum", "A_TeamID", "B_TeamID"]
+
+# Canonical predictions-log schema (identity cols added when available).
+_PRED_COLS = ["Season", "pred_margin", "pred_total", "pred_prob", "Margin", "Total", "Outcome"]
+
+
 @dataclass
 class RegLoToResult:
     model: RegModel
     metrics: dict[str, float]
     brier_by_season: dict[int, float]
+    # DASH-001a: per-game out-of-fold (walk-forward) predictions over the non-holdout seasons.
+    # ``None`` only for back-compat with callers that build a result by hand.
+    oof: pd.DataFrame | None = None
 
 
 def derive_features(games: pd.DataFrame) -> tuple[list[str], list[str]]:
@@ -151,31 +163,35 @@ def train_reg_loto(
         cal = _fit_margin_calibrator(
             mbst.predict(xgb.DMatrix(tr[mfeats].to_numpy())), tr["Outcome"].to_numpy(), config.logistic_C
         )
-        oof_parts.append(pd.DataFrame({
+        part = pd.DataFrame({
             "Season": s,
+            "pred_margin": m_pred, "pred_total": t_pred,
+            "pred_prob": _margin_to_prob(cal, m_pred),
+            "Margin": va["Margin"].to_numpy(), "Total": va["Total"].to_numpy(),
             "Outcome": va["Outcome"].to_numpy(),
-            "prob": _margin_to_prob(cal, m_pred),
-            "m_pred": m_pred, "Margin": va["Margin"].to_numpy(),
-            "t_pred": t_pred, "Total": va["Total"].to_numpy(),
-        }))
+        })
+        for c in _ID_COLS:
+            if c in va.columns:
+                part[c] = va[c].to_numpy()
+        oof_parts.append(part)
     oof = pd.concat(oof_parts, ignore_index=True)
 
     brier_by_season = {
-        int(s): _brier(g["Outcome"].to_numpy(), g["prob"].to_numpy())
+        int(s): _brier(g["Outcome"].to_numpy(), g["pred_prob"].to_numpy())
         for s, g in oof.groupby("Season")
     }
     metrics = {
-        "loto_brier_reg": _brier(oof["Outcome"].to_numpy(), oof["prob"].to_numpy()),
-        "loto_margin_mae_reg": float(np.abs(oof["m_pred"] - oof["Margin"]).mean()),
-        "loto_total_mae_reg": float(np.abs(oof["t_pred"] - oof["Total"]).mean()),
+        "loto_brier_reg": _brier(oof["Outcome"].to_numpy(), oof["pred_prob"].to_numpy()),
+        "loto_margin_mae_reg": float(np.abs(oof["pred_margin"] - oof["Margin"]).mean()),
+        "loto_total_mae_reg": float(np.abs(oof["pred_total"] - oof["Total"]).mean()),
         "n_games_reg": int(len(oof)),
     }
 
     # Production heads on all non-holdout seasons; calibrator cross-fit on the OOF margins.
     mbst, tbst = _train_heads(df, mfeats, tfeats, config)
-    prod_cal = _fit_margin_calibrator(oof["m_pred"].to_numpy(), oof["Outcome"].to_numpy(), config.logistic_C)
+    prod_cal = _fit_margin_calibrator(oof["pred_margin"].to_numpy(), oof["Outcome"].to_numpy(), config.logistic_C)
     model = RegModel(mbst, tbst, prod_cal, mfeats, tfeats)
-    return RegLoToResult(model=model, metrics=metrics, brier_by_season=brier_by_season)
+    return RegLoToResult(model=model, metrics=metrics, brier_by_season=brier_by_season, oof=oof)
 
 
 def score_reg_holdout(
@@ -217,3 +233,52 @@ def score_reg_holdout(
                 if early_w.any():
                     out["holdout_margin_early_reg_w"] = float(margin_err[early_w].mean())
     return out
+
+
+def predict_reg_holdout(
+    model: RegModel, games: pd.DataFrame, holdout_season: int = HOLDOUT_SEASON
+) -> pd.DataFrame:
+    """Per-game predictions on the held-out season (DASH-001a), same schema as ``result.oof``.
+
+    Walk-forward by construction: the production model is trained on all *non*-holdout seasons,
+    so its predictions on ``holdout_season`` never saw those games. Returns an empty, correctly-
+    columned frame when the season is absent.
+    """
+    h = games[games["Season"] == holdout_season].copy()
+    id_cols = [c for c in _ID_COLS if c in h.columns]
+    if h.empty:
+        return pd.DataFrame(columns=_PRED_COLS + id_cols)
+    h[model.margin_features + model.total_features] = \
+        h[model.margin_features + model.total_features].fillna(0)
+    ps = model.predict_scores(h)
+    out = pd.DataFrame({
+        "Season": h["Season"].to_numpy(),
+        "pred_margin": ps["pred_margin"].to_numpy(),
+        "pred_total": ps["pred_total"].to_numpy(),
+        "pred_prob": np.asarray(model.predict_batch(h)),
+        "Margin": h["Margin"].to_numpy(), "Total": h["Total"].to_numpy(),
+        "Outcome": h["Outcome"].to_numpy(),
+    })
+    for c in id_cols:
+        out[c] = h[c].to_numpy()
+    return out
+
+
+def build_reg_predictions_log(
+    result: RegLoToResult, games: pd.DataFrame, holdout_season: int = HOLDOUT_SEASON
+) -> pd.DataFrame:
+    """The DASH-001a predictions log: walk-forward per-game predictions, all seasons.
+
+    Concatenates the LOTO out-of-fold rows (non-holdout seasons, each scored by a model that
+    never trained on that season) with the ``holdout_season`` rows (scored by the all-other-
+    seasons production model). A ``source`` column (``"oof"`` / ``"holdout"``) marks the origin
+    so downstream can filter. Every row is leak-free as-of its game — the correctness core of
+    the dashboard's "we beat KenPom by X" claim (M6 resolved-risk #5).
+
+    In-memory only; persistence + the KenPom/actual join are DASH-001b's job.
+    """
+    oof = result.oof.copy() if result.oof is not None else pd.DataFrame(columns=_PRED_COLS)
+    oof["source"] = "oof"
+    hold = predict_reg_holdout(result.model, games, holdout_season)
+    hold["source"] = "holdout"
+    return pd.concat([oof, hold], ignore_index=True)

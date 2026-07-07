@@ -6,7 +6,9 @@ import pandas as pd
 from cbb.train.reg_model import (
     RegConfig,
     RegModel,
+    build_reg_predictions_log,
     derive_features,
+    predict_reg_holdout,
     score_reg_holdout,
     train_reg_loto,
 )
@@ -141,3 +143,63 @@ def test_holdout_omits_women_metrics_when_ungendered():
     res = train_reg_loto(games, config=_CFG, holdout_season=2026)
     h = score_reg_holdout(res.model, games, holdout_season=2026)
     assert not any(k.endswith("_reg_w") for k in h)
+
+
+# ── DASH-001a: walk-forward predictions log ───────────────────────────────────────
+
+def _with_identity(games):
+    """Add the reg_games identity columns the predictions log threads through."""
+    g = games.copy()
+    g["men_women"] = 0
+    g["DayNum"] = 100
+    g["A_TeamID"] = np.arange(len(g)) % 300 + 1101
+    g["B_TeamID"] = np.arange(len(g)) % 300 + 2101
+    return g
+
+
+def test_oof_is_walk_forward_and_schemad():
+    res = train_reg_loto(_synthetic(), config=_CFG, holdout_season=2026)
+    assert res.oof is not None
+    # Walk-forward: OOF covers only the non-holdout seasons, one row per training game.
+    assert set(res.oof["Season"]) == {2018, 2019, 2020}
+    assert len(res.oof) == 3 * 120
+    for c in ("pred_margin", "pred_total", "pred_prob", "Margin", "Total", "Outcome"):
+        assert c in res.oof.columns
+    assert ((res.oof["pred_prob"] >= 0) & (res.oof["pred_prob"] <= 1)).all()
+
+
+def test_oof_threads_identity_columns_when_present():
+    res = train_reg_loto(_with_identity(_synthetic()), config=_CFG, holdout_season=2026)
+    for c in ("men_women", "DayNum", "A_TeamID", "B_TeamID"):
+        assert c in res.oof.columns
+    # Identity is metadata, never a model feature.
+    assert not any(c in res.model.margin_features + res.model.total_features
+                   for c in ("men_women", "DayNum", "A_TeamID", "B_TeamID"))
+
+
+def test_predict_reg_holdout_scores_only_holdout_season():
+    games = _with_identity(_synthetic())
+    res = train_reg_loto(games, config=_CFG, holdout_season=2026)
+    hold = predict_reg_holdout(res.model, games, holdout_season=2026)
+    assert (hold["Season"] == 2026).all()
+    assert len(hold) == 120
+    assert "A_TeamID" in hold.columns
+
+
+def test_predict_reg_holdout_empty_when_season_absent():
+    games = _synthetic(seasons=(2018, 2019, 2020))
+    res = train_reg_loto(games, config=_CFG, holdout_season=2026)
+    hold = predict_reg_holdout(res.model, games, holdout_season=2026)
+    assert hold.empty
+    assert "pred_margin" in hold.columns  # correctly-columned even when empty
+
+
+def test_predictions_log_concats_oof_and_holdout_with_source():
+    games = _with_identity(_synthetic())
+    res = train_reg_loto(games, config=_CFG, holdout_season=2026)
+    log = build_reg_predictions_log(res, games, holdout_season=2026)
+    # Every game across every season, tagged by origin.
+    assert set(log["source"]) == {"oof", "holdout"}
+    assert (log[log["source"] == "holdout"]["Season"] == 2026).all()
+    assert set(log[log["source"] == "oof"]["Season"]) == {2018, 2019, 2020}
+    assert len(log) == 4 * 120
