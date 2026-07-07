@@ -135,6 +135,10 @@ def _train_reg_season(params: dict, store: DataStore) -> object:
         log.info("Reg holdout 2026: brier %.6f  margin_MAE %.3f  total_MAE %.3f over %d games",
                  hscore["holdout_brier_reg"], hscore["holdout_margin_mae_reg"],
                  hscore["holdout_total_mae_reg"], int(hscore["holdout_n_games_reg"]))
+    if "holdout_brier_reg_w" in hscore:
+        log.info("Reg holdout 2026 (women): brier %.6f  margin_MAE %.3f over %d games",
+                 hscore["holdout_brier_reg_w"], hscore["holdout_margin_mae_reg_w"],
+                 int(hscore["holdout_n_games_reg_w"]))
 
     proc = store.processed_dir
     proc.mkdir(parents=True, exist_ok=True)

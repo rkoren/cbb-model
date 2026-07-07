@@ -110,3 +110,34 @@ def test_holdout_empty_when_season_absent():
     games = _synthetic(seasons=(2018, 2019, 2020))  # no 2026
     res = train_reg_loto(games, config=_CFG, holdout_season=2026)
     assert score_reg_holdout(res.model, games, holdout_season=2026) == {}
+
+
+def test_holdout_emits_women_metrics_when_gendered():
+    # WM-006: with men_women/DayNum present, women-only (_w) metrics are surfaced alongside the
+    # combined ones — including the early-season operational metric.
+    games = _synthetic()
+    hm = (games["Season"] == 2026).to_numpy()
+    idx = np.where(hm)[0]
+    games["men_women"] = 0
+    games["DayNum"] = 100
+    games.loc[idx[0::2], "men_women"] = 1   # half the holdout games are women's
+    games.loc[idx[:20], "DayNum"] = 10      # some early-season games (DayNum <= 29)
+
+    res = train_reg_loto(games, config=_CFG, holdout_season=2026)
+    h = score_reg_holdout(res.model, games, holdout_season=2026)
+
+    for k in ("holdout_brier_reg_w", "holdout_margin_mae_reg_w",
+              "holdout_margin_early_reg_w", "holdout_n_games_reg_w"):
+        assert k in h
+    assert h["holdout_n_games_reg_w"] == int((games.loc[hm, "men_women"] == 1).sum())
+    # men_women/DayNum are not d_/s_ prefixed → never picked up as model features.
+    assert not any(c in res.model.margin_features + res.model.total_features
+                   for c in ("men_women", "DayNum"))
+
+
+def test_holdout_omits_women_metrics_when_ungendered():
+    # Without a men_women column (the synthetic default), no _w metrics are emitted.
+    games = _synthetic()
+    res = train_reg_loto(games, config=_CFG, holdout_season=2026)
+    h = score_reg_holdout(res.model, games, holdout_season=2026)
+    assert not any(k.endswith("_reg_w") for k in h)

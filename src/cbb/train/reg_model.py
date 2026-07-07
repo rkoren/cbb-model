@@ -33,6 +33,10 @@ from cbb.train.model import _brier, _fit_margin_calibrator, _margin_to_prob
 
 HOLDOUT_SEASON = 2026
 
+# Early-season cutoff for the women's operational metric (WM-001): DayNum <= this is the
+# "early" phase, matching the season-phase buckets in cbb.benchmark.women_bench.
+_EARLY_DAYNUM = 29
+
 _REG_XGB_PARAMS = {
     "max_depth": 4,
     "eta": 0.05,
@@ -186,13 +190,30 @@ def score_reg_holdout(
         return {}
     h[model.margin_features + model.total_features] = \
         h[model.margin_features + model.total_features].fillna(0)
-    probs = model.predict_batch(h)
+    probs = np.asarray(model.predict_batch(h))
     ps = model.predict_scores(h)
     y = h["Outcome"].to_numpy()
-    return {
+    margin_err = np.abs(ps["pred_margin"].to_numpy() - h["Margin"].to_numpy())
+    out = {
         "holdout_brier_reg": _brier(y, probs),
-        "holdout_ece_reg": _expected_calibration_error(y, np.asarray(probs)),
-        "holdout_margin_mae_reg": float(np.abs(ps["pred_margin"].to_numpy() - h["Margin"].to_numpy()).mean()),
+        "holdout_ece_reg": _expected_calibration_error(y, probs),
+        "holdout_margin_mae_reg": float(margin_err.mean()),
         "holdout_total_mae_reg": float(np.abs(ps["pred_total"].to_numpy() - h["Total"].to_numpy()).mean()),
         "holdout_n_games_reg": int(len(h)),
     }
+
+    # WM-006: women-only holdout metrics. The combined-gender gauge above can't see women-only
+    # gains (WM-003's Torvik lift was invisible to loto_brier_reg), so surface them with a `_w`
+    # suffix → they show in kitchen leaderboard/diff and become promotable. Guarded on the
+    # column so synthetic frames without `men_women` still score.
+    if "men_women" in h.columns:
+        w = (h["men_women"] == 1).to_numpy()
+        if w.any():
+            out["holdout_brier_reg_w"] = _brier(y[w], probs[w])
+            out["holdout_margin_mae_reg_w"] = float(margin_err[w].mean())
+            out["holdout_n_games_reg_w"] = int(w.sum())
+            if "DayNum" in h.columns:
+                early_w = w & (h["DayNum"].to_numpy() <= _EARLY_DAYNUM)
+                if early_w.any():
+                    out["holdout_margin_early_reg_w"] = float(margin_err[early_w].mean())
+    return out
