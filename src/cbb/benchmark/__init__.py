@@ -3,6 +3,11 @@ from .fanmatch_bench import (
     match_fanmatch_to_results,
     score_predictions,
 )
+from .ratings_log import (
+    adjself_to_ours,
+    build_ratings_log,
+    ratings_to_comparator,
+)
 from .slate import (
     fanmatch_to_comparator,
     match_comparator_to_log,
@@ -22,6 +27,9 @@ __all__ = [
     "fanmatch_to_comparator",
     "match_comparator_to_log",
     "score_slate",
+    "adjself_to_ours",
+    "build_ratings_log",
+    "ratings_to_comparator",
     "holdout_metrics",
     "naive_metrics",
     "add_dimensions",
