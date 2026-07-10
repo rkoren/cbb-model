@@ -45,6 +45,13 @@ def _name(name_map: dict[int, str], tid: Any) -> str:
     return name_map.get(int(tid), f"#{int(tid)}")
 
 
+def _scores(total: float | None, margin: float | None) -> dict[str, int | None]:
+    """Reconstruct the two team scores (A, B) from a predicted/actual total + margin (A − B)."""
+    if total is None or margin is None:
+        return {"a": None, "b": None}
+    return {"a": round((total + margin) / 2), "b": round((total - margin) / 2)}
+
+
 def build_slate(predictions_log: pd.DataFrame, name_map: dict[int, str]) -> dict[str, list[dict]]:
     """Group the predictions log into ``{game_date: [game, ...]}`` (DASH-002).
 
@@ -59,19 +66,20 @@ def build_slate(predictions_log: pd.DataFrame, name_map: dict[int, str]) -> dict
     slate: dict[str, list[dict]] = {}
     for r in predictions_log.itertuples(index=False):
         d = r._asdict()
+        our_margin, our_total = _num(d["pred_margin"]), _num(d["pred_total"])
         kp_margin = _num(d["cmp_margin"]) if has_cmp else None
-        our_margin = _num(d["pred_margin"])
+        kp_total = _num(d.get("cmp_total")) if has_cmp else None
+        act_margin, act_total = _num(d["Margin"]), _num(d["Total"])
         gap = None if (kp_margin is None or our_margin is None) else round(our_margin - kp_margin, 2)
         game = {
             "a": _name(name_map, d["A_TeamID"]),
             "b": _name(name_map, d["B_TeamID"]),
             "gender": "W" if int(d.get("men_women", 0)) == 1 else "M",
-            "our": {"margin": our_margin, "total": _num(d["pred_total"]),
-                    "prob": _num(d["pred_prob"], 3)},
+            # Each predictor carries reconstructed team scores (a, b), win prob P(A wins), margin.
+            "our": {**_scores(our_total, our_margin), "prob": _num(d["pred_prob"], 3), "margin": our_margin},
             "kp": None if not has_cmp else {
-                "margin": kp_margin, "total": _num(d.get("cmp_total")),
-                "prob": _num(d.get("cmp_prob"), 3)},
-            "actual": {"margin": _num(d["Margin"]), "total": _num(d["Total"]),
+                **_scores(kp_total, kp_margin), "prob": _num(d.get("cmp_prob"), 3), "margin": kp_margin},
+            "actual": {**_scores(act_total, act_margin), "margin": act_margin,
                        "won": None if pd.isna(d["Outcome"]) else int(d["Outcome"])},
             "gap_margin": gap,
         }

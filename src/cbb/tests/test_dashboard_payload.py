@@ -38,6 +38,14 @@ def test_slate_groups_by_date_and_maps_names():
     assert g["actual"]["won"] == 1
 
 
+def test_slate_reconstructs_team_scores_from_total_and_margin():
+    g = build_slate(_pred([_slate_row()]), NAMES)["2026-03-01"][0]
+    assert (g["our"]["a"], g["our"]["b"]) == (77, 71)        # (148 ± 6) / 2
+    assert (g["kp"]["a"], g["kp"]["b"]) == (77, 74)          # (151 ± 3) / 2
+    assert (g["actual"]["a"], g["actual"]["b"]) == (77, 73)  # (150 ± 4) / 2
+    assert g["our"]["prob"] == 0.70
+
+
 def test_slate_gap_is_us_minus_kenpom_and_sorts_by_magnitude():
     log = _pred([
         _slate_row(A_TeamID=1101, B_TeamID=1102, pred_margin=6.0, cmp_margin=3.0),   # gap +3
