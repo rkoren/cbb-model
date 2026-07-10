@@ -42,13 +42,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Checkout kitchen-platform
-        uses: actions/checkout@v4
-        with:
-          repository: rkoren/kitchen-platform
-          ref: main
-          path: kitchen-platform
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -56,10 +49,8 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        # kitchen-platform is checked out above into ./kitchen-platform and installed editable
-        # from its kitchen/ subdir (satisfies cbb-model's rkoren-kitchen dep). Locally you'd use
-        # the sibling path: pip install -e ../kitchen-platform/kitchen -e . --quiet
-        run: pip install -e ./kitchen-platform/kitchen -e . --quiet
+        # rkoren-kitchen resolves from PyPI via the pinned dep in pyproject.toml (>=1.0.2,<2).
+        run: pip install -e . --quiet
 
       - name: Configure AWS credentials (OIDC)
         # Assumes the IAM role via GitHub OIDC — no long-lived keys. Exports temporary AWS_*
