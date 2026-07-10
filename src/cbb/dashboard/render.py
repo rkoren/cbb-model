@@ -98,16 +98,18 @@ function renderSlate() {
 
 function renderRatings() {
   const rd = latestRatingOnOrBefore(activeDate);
-  const teams = rd ? DATA.ratings[rd] : null;
+  const all = rd ? DATA.ratings[rd] : null;
+  const teams = all ? all.filter(t => gender === "all" || t.gender === gender) : null;
   if (!teams || !teams.length) { $("ratingsView").innerHTML = '<p class="empty">No ratings snapshot on or before this date.</p>'; return; }
+  // Men rank vs KenPom, women vs Torvik — rank is within gender.
   const rows = teams.map(t => `<tr>
-    <td>${fmt(t.our.rank,0)}</td><td class="l">${t.team}</td>
+    <td>${fmt(t.our.rank,0)}</td><td>${t.gender}</td><td class="l">${t.team}</td>
     <td>${fmt(t.our.em,1)}</td><td>${fmt(t.our.oe,1)}</td><td>${fmt(t.our.de,1)}</td><td>${fmt(t.our.tempo,1)}</td>
     <td>${fmt(t.kp.em,1)}</td><td>${fmt(t.kp.rank,0)}</td>
     <td>${signed(t.d_em,1)}</td><td>${signed(t.d_rank,0)}</td></tr>`).join("");
-  $("ratingsView").innerHTML = `<p class="empty">Snapshot as of ${rd} (latest \\u2264 ${activeDate})</p><div class="scroll"><table>
-    <thead><tr><th>#</th><th class="l">Team</th><th>our EM</th><th>OE</th><th>DE</th><th>Tempo</th>
-    <th>KP EM</th><th>KP #</th><th>d EM</th><th>d #</th></tr></thead>
+  $("ratingsView").innerHTML = `<p class="empty">Snapshot as of ${rd} (latest \\u2264 ${activeDate}) \\u00b7 ours vs KenPom (M) / Torvik (W), rank within gender</p><div class="scroll"><table>
+    <thead><tr><th>#</th><th>G</th><th class="l">Team</th><th>our EM</th><th>OE</th><th>DE</th><th>Tempo</th>
+    <th>cmp EM</th><th>cmp #</th><th>d EM</th><th>d #</th></tr></thead>
     <tbody>${rows}</tbody></table></div>`;
 }
 
@@ -127,7 +129,7 @@ function init() {
   $("prevDay").onclick = () => stepDay(-1); $("nextDay").onclick = () => stepDay(1);
   $("prevWk").onclick = () => stepWeek(-1); $("nextWk").onclick = () => stepWeek(1);
   $("datePick").onchange = (e) => setDate(e.target.value);
-  $("gender").onchange = (e) => { gender = e.target.value; renderSlate(); };
+  $("gender").onchange = (e) => { gender = e.target.value; renderSlate(); renderRatings(); };
   $("tabSlate").onclick = () => setView("slate"); $("tabRatings").onclick = () => setView("ratings");
   setView("slate");
   if (activeDate) setDate(activeDate); else $("slateView").innerHTML = '<p class="empty">No data.</p>';

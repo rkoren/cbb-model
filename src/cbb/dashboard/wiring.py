@@ -16,7 +16,11 @@ from __future__ import annotations
 
 import pandas as pd
 
+from cbb.benchmark.ratings_log import COMPARATOR_COLS, build_ratings_log
 from cbb.benchmark.slate import match_comparator_to_log
+
+# Kaggle TeamID convention: men < 2000, women >= 3000 (2000–2999 unused). Split at 2000.
+_MEN_MAX_TEAMID = 2000
 
 
 def dayzero_by_gender_season(
@@ -90,3 +94,48 @@ def build_name_map(*team_frames: pd.DataFrame | None) -> dict[int, str]:
         for r in df.itertuples(index=False):
             m[int(r.TeamID)] = str(r.TeamName)
     return m
+
+
+def ratings_frame_to_comparator(
+    df: pd.DataFrame,
+    name_map: dict[str, int],
+    rating_map: dict[str, str],
+    season: int,
+    derive_em: bool = False,
+) -> pd.DataFrame:
+    """Adapt a multi-date ratings frame (KenPom archive / Torvik) to the ratings comparator contract.
+
+    ``df`` has a ``TeamName`` column, an ``ArchiveDate`` (used verbatim as ``snapshot_date``), and
+    the rating columns named in ``rating_map`` (source col → base, e.g. ``{"AdjEM": "AdjEM"}`` or
+    ``{"tv_AdjOE": "AdjOE"}``). ``name_map`` maps source team name → Kaggle TeamID (unmapped rows
+    dropped). ``derive_em`` sets ``cmp_AdjEM = cmp_AdjOE − cmp_AdjDE`` for Torvik, which has no
+    efficiency-margin column. Returns the :data:`cbb.benchmark.ratings_log.COMPARATOR_COLS` shape.
+    """
+    d = df.copy()
+    d["TeamID"] = d["TeamName"].map(name_map)
+    d = d.dropna(subset=["TeamID"]).copy()
+    d["TeamID"] = d["TeamID"].astype(int)
+    d = d.rename(columns={src: f"cmp_{base}" for src, base in rating_map.items()})
+    if derive_em:
+        d["cmp_AdjEM"] = d["cmp_AdjOE"] - d["cmp_AdjDE"]
+    d["Season"] = season
+    d["snapshot_date"] = pd.to_datetime(d["ArchiveDate"])
+    return d[COMPARATOR_COLS].reset_index(drop=True)
+
+
+def build_gendered_ratings_log(ours: pd.DataFrame, comparator: pd.DataFrame) -> pd.DataFrame:
+    """Ratings log with rank computed *within gender*.
+
+    Men (vs KenPom) and women (vs Torvik) are separate rating populations on different scales, so
+    pooling them into one ``rank(-AdjEM)`` is meaningless. Build the log per gender (split by the
+    Kaggle TeamID convention) and concatenate, so each side's rank/rank-delta is internal.
+    """
+    frames = []
+    for lo, hi in [(0, _MEN_MAX_TEAMID), (_MEN_MAX_TEAMID, 10**12)]:
+        o = ours[(ours["TeamID"] >= lo) & (ours["TeamID"] < hi)]
+        if o.empty:
+            continue
+        c = comparator[(comparator["TeamID"] >= lo) & (comparator["TeamID"] < hi)] \
+            if not comparator.empty else comparator
+        frames.append(build_ratings_log(o, c))
+    return pd.concat(frames, ignore_index=True) if frames else build_ratings_log(ours, comparator)

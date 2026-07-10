@@ -1,14 +1,18 @@
 """Tests for the dashboard wiring helpers (DASH-002)."""
 
 import pandas as pd
+import pytest
 
+from cbb.benchmark.ratings_log import COMPARATOR_COLS as RATINGS_COMPARATOR_COLS
 from cbb.benchmark.slate import COMPARATOR_COLS
 from cbb.dashboard.wiring import (
     add_game_date,
     attach_kenpom_slate,
+    build_gendered_ratings_log,
     build_name_map,
     dayzero_by_gender_season,
     dedupe_symmetric,
+    ratings_frame_to_comparator,
 )
 
 _MSEASONS = pd.DataFrame({"Season": [2025, 2026], "DayZero": ["11/04/2024", "11/03/2025"]})
@@ -76,6 +80,45 @@ def test_attach_kenpom_slate_noop_on_empty_comparator():
                         "B_TeamID": [1102], "pred_margin": [6.0]})
     out = attach_kenpom_slate(log, pd.DataFrame(columns=COMPARATOR_COLS))
     assert "cmp_margin" not in out.columns and len(out) == 1
+
+
+def test_ratings_frame_to_comparator_archive_shape():
+    arch = pd.DataFrame({
+        "TeamName": ["Duke", "Kansas", "Nowhere"], "ArchiveDate": ["2026-01-05"] * 3,
+        "AdjEM": [20.0, 10.0, 5.0], "AdjOE": [115, 110, 108],
+        "AdjDE": [95, 100, 103], "AdjTempo": [68, 70, 66]})
+    name_map = {"Duke": 1101, "Kansas": 1102}   # "Nowhere" unmapped → dropped
+    cmp = ratings_frame_to_comparator(
+        arch, name_map, {"AdjEM": "AdjEM", "AdjOE": "AdjOE", "AdjDE": "AdjDE", "AdjTempo": "AdjTempo"},
+        season=2026)
+    assert list(cmp.columns) == RATINGS_COMPARATOR_COLS
+    assert set(cmp["TeamID"]) == {1101, 1102}
+    assert (cmp["snapshot_date"] == pd.Timestamp("2026-01-05")).all()
+    assert cmp.loc[cmp["TeamID"] == 1101, "cmp_AdjEM"].iloc[0] == 20.0
+
+
+def test_ratings_frame_to_comparator_derives_em_for_torvik():
+    tv = pd.DataFrame({"TeamName": ["UConn"], "ArchiveDate": ["2026-01-05"],
+                       "tv_AdjOE": [119.0], "tv_AdjDE": [74.0], "tv_AdjTempo": [73.0]})
+    cmp = ratings_frame_to_comparator(
+        tv, {"UConn": 3101}, {"tv_AdjOE": "AdjOE", "tv_AdjDE": "AdjDE", "tv_AdjTempo": "AdjTempo"},
+        season=2026, derive_em=True)
+    assert cmp["cmp_AdjEM"].iloc[0] == pytest.approx(45.0)   # 119 − 74
+    assert cmp["cmp_AdjOE"].iloc[0] == 119.0
+
+
+def test_build_gendered_ratings_log_ranks_within_gender():
+    # A women's team with higher AdjEM than the top man must not outrank men — ranks are per-gender.
+    ours = pd.DataFrame({
+        "Season": [2026] * 4, "TeamID": [1101, 1102, 3101, 3102],
+        "ArchiveDate": [pd.Timestamp("2026-01-05")] * 4,
+        "our_AdjEM": [30.0, 20.0, 70.0, 60.0],       # women (3xxx) have the larger scale
+        "our_AdjOE": [115, 110, 120, 118], "our_AdjDE": [95, 100, 90, 92], "our_AdjTempo": [68, 70, 72, 71],
+    })
+    log = build_gendered_ratings_log(ours, pd.DataFrame())
+    r = log.set_index("TeamID")["our_rank"]
+    assert r[1101] == 1 and r[1102] == 2          # men ranked among men
+    assert r[3101] == 1 and r[3102] == 2          # women ranked among women (not 1..4 pooled)
 
 
 def test_build_name_map_merges_frames():

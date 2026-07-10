@@ -92,6 +92,7 @@ def build_ratings(ratings_log: pd.DataFrame, name_map: dict[int, str]) -> dict[s
         d = r._asdict()
         team = {
             "team": _name(name_map, d["TeamID"]),
+            "gender": "W" if int(d["TeamID"]) >= 2000 else "M",   # Kaggle: men < 2000, women >= 3000
             "our": {"em": _num(d["our_AdjEM"]), "oe": _num(d.get("our_AdjOE")),
                     "de": _num(d.get("our_AdjDE")), "tempo": _num(d.get("our_AdjTempo")),
                     "rank": _num(d.get("our_rank"), 0)},
