@@ -67,6 +67,10 @@ _TEMPLATE = """<!DOCTYPE html>
     padding: .05rem .3rem; border-radius: 5px; background: var(--accent-soft); color: var(--accent); margin-right: .45rem; }
   .pos { color: var(--pos); font-weight: 600; } .neg { color: var(--neg); font-weight: 600; }
   .muted { color: var(--faint); }
+  .summary { margin: .8rem 0 .2rem; padding: .65rem .9rem; border: 1px solid var(--line);
+    border-radius: 10px; background: var(--head); font-size: .82rem; line-height: 1.75; }
+  .summary .lbl { color: var(--muted); }
+  .good { color: var(--pos); font-weight: 650; } .bad { color: var(--neg); }
   .legend { color: var(--muted); font-size: .76rem; margin: .7rem .2rem 0; line-height: 1.5; }
   .empty { color: var(--muted); padding: 1.25rem; text-align: center; }
   .snapnote { color: var(--muted); font-size: .78rem; margin: 0 .2rem .5rem; }
@@ -135,6 +139,25 @@ function stepDay(dir) {
 }
 function stepWeek(dir) { for (let k = 0; k < 7; k++) stepDay(dir); }
 
+// Day accuracy vs KenPom: over completed men's games (KenPom + a final), how far each model's
+// predicted total and margin landed from the final — signed avg (+/- vs final) and abs error.
+function daySummary(games) {
+  const g = games.filter(x => x.kp && x.kp.a !== null && x.actual.a !== null);
+  if (!g.length) return "";
+  const mean = (a) => a.reduce((s, v) => s + v, 0) / a.length;
+  const tot = (p) => p.a + p.b;
+  const stat = (pick) => { const err = g.map(pick); return { pm: mean(err), mae: mean(err.map(Math.abs)) }; };
+  const ourT = stat(x => tot(x.our) - tot(x.actual)), kpT = stat(x => tot(x.kp) - tot(x.actual));
+  const ourM = stat(x => x.our.margin - x.actual.margin), kpM = stat(x => x.kp.margin - x.actual.margin);
+  const sgn = (v) => (v > 0 ? "+" : "") + v.toFixed(1);
+  const cell = (mine, theirs) => `<span class="${Math.abs(mine.mae) <= Math.abs(theirs.mae) ? "good" : "bad"}">${sgn(mine.pm)} <span class="wp">\\u00b1${mine.mae.toFixed(1)}</span></span>`;
+  return `<div class="summary">
+    <span class="lbl">This day \\u00b7 ${g.length} men's game${g.length === 1 ? "" : "s"} vs KenPom \\u00b7 avg predicted \\u2212 final (\\u00b1 = avg miss):</span><br>
+    <span class="lbl">Total points:</span> us ${cell(ourT, kpT)} &nbsp; vs &nbsp; KenPom ${sgn(kpT.pm)} <span class="wp">\\u00b1${kpT.mae.toFixed(1)}</span><br>
+    <span class="lbl">Margin:</span> us ${cell(ourM, kpM)} &nbsp; vs &nbsp; KenPom ${sgn(kpM.pm)} <span class="wp">\\u00b1${kpM.mae.toFixed(1)}</span>
+  </div>`;
+}
+
 function renderSlate() {
   const games = (DATA.slate[activeDate] || []).filter(g => gender === "all" || g.gender === gender);
   if (!games.length) { $("slateView").innerHTML = '<p class="empty">No games on this date.</p>'; return; }
@@ -152,8 +175,10 @@ function renderSlate() {
       <th>Final <span class="sub">score</span></th>
       <th>Edge <span class="sub">us \\u2212 KP margin</span></th>
     </tr></thead><tbody>${rows}</tbody></table></div>
+    ${daySummary(games)}
     <p class="legend"><b>Bold</b> = predicted/actual winner \\u00b7 <b>Edge</b> is how many points more
     our model favors team A than KenPom does; rows are sorted by the biggest disagreement.
+    In the day summary, <span class="good">green</span> marks the model closer to the final (smaller avg miss).
     KenPom FanMatch covers men's games only \\u2014 women show \\u2014.</p>`;
 }
 
