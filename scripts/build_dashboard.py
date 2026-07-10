@@ -19,19 +19,23 @@ from pathlib import Path
 
 import pandas as pd
 
+from cbb.benchmark.slate import fanmatch_to_comparator
 from cbb.dashboard import build_payload, render_html
 from cbb.dashboard.wiring import (
     add_game_date,
+    attach_kenpom_slate,
     build_name_map,
     dayzero_by_gender_season,
     dedupe_symmetric,
 )
+from cbb.kenpom.features import build_team_name_map
 from cbb.train.reg_model import RegConfig, build_reg_predictions_log, train_reg_loto
 
 warnings.filterwarnings("ignore")
 
 DATA = Path("data/processed")
 RAW = Path("data/raw")
+KP = Path("data/kenpom")
 OUT = Path("monitoring/handicapper.html")
 LOG_OUT = DATA / "reg_predictions_log.parquet"
 
@@ -39,6 +43,21 @@ LOG_OUT = DATA / "reg_predictions_log.parquet"
 def _read_csv(name: str) -> pd.DataFrame | None:
     path = RAW / f"{name}.csv"
     return pd.read_csv(path) if path.exists() else None
+
+
+def _kenpom_comparator(season: int, dayzero: dict) -> pd.DataFrame | None:
+    """KenPom FanMatch predictions as a comparator (men only), from the cached parquets.
+
+    The archive frame supplies the KenPom team names for the KenPom→Kaggle-TeamID map, so no live
+    API call is needed. Returns ``None`` when the FanMatch or archive cache for the season is absent.
+    """
+    fm_path = KP / "fanmatch" / f"fanmatch_{season}.parquet"
+    arch_path = KP / "archive" / f"kenpom_archive_{season}.parquet"
+    if not (fm_path.exists() and arch_path.exists()):
+        return None
+    kp_teams = pd.read_parquet(arch_path)[["TeamName"]].drop_duplicates()
+    tmap = build_team_name_map(_read_csv("MTeams"), kp_teams, _read_csv("MTeamSpellings"))
+    return fanmatch_to_comparator(pd.read_parquet(fm_path), tmap, dayzero[(season, 0)], season)
 
 
 def build(season: int) -> None:
@@ -52,14 +71,18 @@ def build(season: int) -> None:
     dayzero = dayzero_by_gender_season(_read_csv("MSeasons"), _read_csv("WSeasons"))
     log = add_game_date(log, dayzero)
     log = log.dropna(subset=["game_date"])
+
+    # KenPom FanMatch comparator (men-only where cached) → us vs KenPom vs actual on the slate.
+    comparator = _kenpom_comparator(season, dayzero)
+    if comparator is not None:
+        log = attach_kenpom_slate(log, comparator)
+        print(f"KenPom comparator: {int(log['cmp_margin'].notna().sum()):,} games matched")
+    else:
+        print("KenPom comparator: no FanMatch cache — slate renders us vs actual only")
+
     LOG_OUT.parent.mkdir(parents=True, exist_ok=True)
     log.to_parquet(LOG_OUT, index=False)
     print(f"predictions log: {len(log):,} rows → {LOG_OUT}")
-
-    # ── DASH-002 KenPom comparator hook ──────────────────────────────────────────────
-    # When data/processed/fanmatch_{season}.parquet is cached, adapt it with
-    # cbb.benchmark.slate.fanmatch_to_comparator + match_comparator_to_log here to add the
-    # cmp_* columns; until then the slate renders us-vs-actual and the KenPom column is blank.
 
     name_map = build_name_map(_read_csv("MTeams"), _read_csv("WTeams"))
     slate_log = log[log["Season"] == season]
