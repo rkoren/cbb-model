@@ -7,6 +7,9 @@ data/processed/*
 !data/raw/.gitkeep
 !data/processed/.gitkeep
 
+# generated dashboard (regenerate with scripts/build_dashboard.py; too large to commit per build)
+monitoring/handicapper.html
+
 # python
 __pycache__/
 *.py[cod]
