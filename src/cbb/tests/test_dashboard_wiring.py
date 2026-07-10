@@ -2,8 +2,10 @@
 
 import pandas as pd
 
+from cbb.benchmark.slate import COMPARATOR_COLS
 from cbb.dashboard.wiring import (
     add_game_date,
+    attach_kenpom_slate,
     build_name_map,
     dayzero_by_gender_season,
     dedupe_symmetric,
@@ -51,6 +53,29 @@ def test_dedupe_symmetric_keeps_one_orientation_per_game():
     assert len(out) == 2                                   # the 1101/1102 mirror collapses to one
     assert (out["A_TeamID"] < out["B_TeamID"]).all()
     assert set(zip(out["A_TeamID"], out["B_TeamID"])) == {(1101, 1102), (1103, 1104)}
+
+
+def test_attach_kenpom_slate_left_joins_cmp_and_keeps_unmatched():
+    log = pd.DataFrame({
+        "Season": [2026, 2026], "DayNum": [10, 11],
+        "A_TeamID": [1101, 1103], "B_TeamID": [1102, 1104],   # 2nd game has no comparator
+        "pred_margin": [6.0, 4.0],
+    })
+    comparator = pd.DataFrame([{
+        "Season": 2026, "DayNum": 10, "home_id": 1101, "vis_id": 1102,
+        "cmp_margin": 3.0, "cmp_total": 150.0, "cmp_home_wp": 0.7}], columns=COMPARATOR_COLS)
+    out = attach_kenpom_slate(log, comparator)
+    assert len(out) == 2                                   # no rows dropped
+    m = out.set_index("A_TeamID")
+    assert m.loc[1101, "cmp_margin"] == 3.0                # matched game gets KenPom
+    assert pd.isna(m.loc[1103, "cmp_margin"])              # unmatched stays null
+
+
+def test_attach_kenpom_slate_noop_on_empty_comparator():
+    log = pd.DataFrame({"Season": [2026], "DayNum": [10], "A_TeamID": [1101],
+                        "B_TeamID": [1102], "pred_margin": [6.0]})
+    out = attach_kenpom_slate(log, pd.DataFrame(columns=COMPARATOR_COLS))
+    assert "cmp_margin" not in out.columns and len(out) == 1
 
 
 def test_build_name_map_merges_frames():

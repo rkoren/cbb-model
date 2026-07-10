@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import pandas as pd
 
+from cbb.benchmark.slate import match_comparator_to_log
+
 
 def dayzero_by_gender_season(
     mseasons: pd.DataFrame, wseasons: pd.DataFrame | None = None
@@ -59,6 +61,24 @@ def dedupe_symmetric(log: pd.DataFrame) -> pd.DataFrame:
     orientation ``A_TeamID < B_TeamID`` (deterministic; margins/prob stay oriented to that A).
     """
     return log[log["A_TeamID"].astype(int) < log["B_TeamID"].astype(int)].reset_index(drop=True)
+
+
+def attach_kenpom_slate(log: pd.DataFrame, comparator: pd.DataFrame) -> pd.DataFrame:
+    """Left-join the KenPom comparator's A-oriented ``cmp_*`` onto the predictions log.
+
+    :func:`cbb.benchmark.slate.match_comparator_to_log` inner-joins (matched games only, re-oriented
+    to our A); this keeps every log row and fills ``cmp_margin``/``cmp_total``/``cmp_prob`` where a
+    comparator existed, leaving the rest NaN — so the slate shows a KenPom line only where FanMatch
+    covered the game (men-2026 in practice). No-op when the comparator is empty.
+    """
+    if comparator.empty:
+        return log
+    matched, _ = match_comparator_to_log(log, comparator)
+    if matched.empty:
+        return log
+    keys = ["Season", "DayNum", "A_TeamID", "B_TeamID"]
+    cmp_cols = ["cmp_margin", "cmp_total", "cmp_prob"]
+    return log.merge(matched[keys + cmp_cols], on=keys, how="left")
 
 
 def build_name_map(*team_frames: pd.DataFrame | None) -> dict[int, str]:
