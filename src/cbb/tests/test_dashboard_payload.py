@@ -101,6 +101,13 @@ def test_payload_shape_and_json_serializable():
                    for v in [team["d_em"], team["our"]["em"]])
 
 
+def test_ratings_team_carries_gender():
+    rates = _ratings([_rating_row(TeamID=1101), _rating_row(TeamID=3101, our_rank=1.0)])
+    teams = build_payload(_pred([_slate_row()]), rates, {**NAMES, 3101: "UConn"})["ratings"]["2026-03-01"]
+    by_id = {t["team"]: t["gender"] for t in teams}
+    assert by_id["Duke"] == "M" and by_id["UConn"] == "W"   # TeamID < 2000 → M, >= 2000 → W
+
+
 def test_ratings_sorted_by_our_rank():
     rates = _ratings([
         _rating_row(TeamID=1102, our_rank=3.0),
