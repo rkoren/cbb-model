@@ -50,19 +50,20 @@ _TEMPLATE = """<!DOCTYPE html>
   button.tab { border-radius: 999px; padding: .35rem .9rem; }
   button.tab[aria-selected="true"] { background: var(--accent); color: #fff; border-color: var(--accent); }
   .scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: 12px; }
-  table { border-collapse: collapse; width: 100%; font-size: .875rem; font-variant-numeric: tabular-nums; }
-  thead th { background: var(--head); color: var(--muted); font-weight: 600; font-size: .7rem;
-    text-transform: uppercase; letter-spacing: .04em; text-align: right; padding: .55rem .7rem;
+  table { border-collapse: collapse; width: 100%; font-size: .82rem; font-variant-numeric: tabular-nums; }
+  thead th { background: var(--head); color: var(--muted); font-weight: 600; font-size: .68rem;
+    text-transform: uppercase; letter-spacing: .03em; text-align: right; padding: .5rem .5rem;
     position: sticky; top: 0; border-bottom: 1px solid var(--line); }
-  thead th .sub { display: block; font-size: .62rem; font-weight: 500; text-transform: none;
+  thead th .sub { display: block; font-size: .6rem; font-weight: 500; text-transform: none;
     letter-spacing: 0; color: var(--faint); }
-  tbody td { text-align: right; padding: .5rem .7rem; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  tbody td { text-align: right; padding: .42rem .5rem; border-bottom: 1px solid var(--line); white-space: nowrap; }
   tbody tr:last-child td { border-bottom: none; }
   tbody tr:hover td { background: var(--row-hover); }
   th.l, td.l { text-align: left; }
-  td.matchup { font-weight: 550; }
+  td.matchup { font-weight: 550; white-space: normal; line-height: 1.25; min-width: 8.5rem; max-width: 14rem; }
   .score b { font-weight: 700; }
-  .wp { color: var(--muted); font-size: .78rem; margin-left: .15rem; }
+  .wabbr { color: var(--accent); font-weight: 650; font-size: .72rem; margin-right: .1rem; }
+  .wp { color: var(--muted); font-size: .74rem; margin-left: .12rem; }
   .badge { display: inline-block; min-width: 1.15rem; text-align: center; font-size: .65rem; font-weight: 700;
     padding: .05rem .3rem; border-radius: 5px; background: var(--accent-soft); color: var(--accent); margin-right: .45rem; }
   .pos { color: var(--pos); font-weight: 600; } .neg { color: var(--neg); font-weight: 600; }
@@ -116,12 +117,13 @@ const signed = (v, d) => {
   const c = v > 0 ? "pos" : (v < 0 ? "neg" : "");
   return '<span class="' + c + '">' + (v > 0 ? "+" : "") + v.toFixed(d) + "</span>";
 };
-// "78–70 · 62%" with the winning score bolded; win prob optional.
-function scoreCell(p, withProb) {
+// "SF 78–70 · 62%": abbreviated winner, then the score (winning side bolded), then optional win%.
+function scoreCell(p, aAbbr, bAbbr, withProb) {
   if (!p || p.a === null || p.a === undefined) return '<span class="muted">\\u2014</span>';
+  const win = p.a >= p.b ? aAbbr : bAbbr;
   const a = p.a >= p.b ? "<b>" + p.a + "</b>" : "" + p.a;
   const b = p.b > p.a ? "<b>" + p.b + "</b>" : "" + p.b;
-  let s = '<span class="score">' + a + DASH + b + "</span>";
+  let s = '<span class="wabbr">' + win + '</span> <span class="score">' + a + DASH + b + "</span>";
   if (withProb && p.prob !== null && p.prob !== undefined)
     s += '<span class="wp">' + Math.round(p.prob * 100) + "%</span>";
   return s;
@@ -163,21 +165,24 @@ function renderSlate() {
   if (!games.length) { $("slateView").innerHTML = '<p class="empty">No games on this date.</p>'; return; }
   const rows = games.map(g => `<tr>
     <td class="l matchup"><span class="badge">${g.gender}</span>${g.a} vs ${g.b}</td>
-    <td>${scoreCell(g.kp, true)}</td>
-    <td>${scoreCell(g.our, true)}</td>
-    <td>${scoreCell(g.actual, false)}</td>
-    <td>${signed(g.gap_margin, 1)}</td></tr>`).join("");
+    <td>${scoreCell(g.kp, g.a_abbr, g.b_abbr, true)}</td>
+    <td>${scoreCell(g.our, g.a_abbr, g.b_abbr, true)}</td>
+    <td>${scoreCell(g.actual, g.a_abbr, g.b_abbr, false)}</td>
+    <td>${signed(g.gap_margin, 1)}</td>
+    <td>${signed(g.gap_total, 1)}</td></tr>`).join("");
   $("slateView").innerHTML = `<div class="scroll"><table>
     <thead><tr>
       <th class="l">Matchup</th>
-      <th>KenPom <span class="sub">score · win%</span></th>
-      <th>Our model <span class="sub">score · win%</span></th>
-      <th>Final <span class="sub">score</span></th>
-      <th>Edge <span class="sub">us \\u2212 KP margin</span></th>
+      <th>KenPom <span class="sub">winner · score · win%</span></th>
+      <th>Our model <span class="sub">winner · score · win%</span></th>
+      <th>Final <span class="sub">winner · score</span></th>
+      <th>Spread \\u0394 <span class="sub">us \\u2212 KP</span></th>
+      <th>Total \\u0394 <span class="sub">us \\u2212 KP</span></th>
     </tr></thead><tbody>${rows}</tbody></table></div>
     ${daySummary(games)}
-    <p class="legend"><b>Bold</b> = predicted/actual winner \\u00b7 <b>Edge</b> is how many points more
-    our model favors team A than KenPom does; rows are sorted by the biggest disagreement.
+    <p class="legend"><b>Bold</b> / the leading abbreviation = predicted/actual winner \\u00b7
+    <b>Spread \\u0394</b> = our margin \\u2212 KenPom's, <b>Total \\u0394</b> = our total \\u2212 KenPom's
+    (rows sorted by the biggest spread disagreement).
     In the day summary, <span class="good">green</span> marks the model closer to the final (smaller avg miss).
     KenPom FanMatch covers men's games only \\u2014 women show \\u2014.</p>`;
 }
@@ -192,12 +197,12 @@ function renderRatings() {
     <td>${em(t.our.em, 1)}</td><td>${em(t.our.oe, 1)}</td><td>${em(t.our.de, 1)}</td><td>${em(t.our.tempo, 1)}</td>
     <td>${em(t.kp.em, 1)}</td><td>${em(t.kp.rank, 0)}</td>
     <td>${signed(t.d_em, 1)}</td><td>${signed(t.d_rank, 0)}</td></tr>`).join("");
-  $("ratingsView").innerHTML = `<p class="snapnote">Ratings as of ${rd} (latest snapshot \\u2264 ${activeDate}) \\u2014 our efficiency vs KenPom (men) / Torvik (women), ranked within gender.</p>
-    <div class="scroll"><table><thead><tr>
+  $("ratingsView").innerHTML = `<p class="snapnote">Ratings as of ${rd} (latest snapshot \\u2264 ${activeDate}) \\u2014 our efficiency vs KenPom (men) / Torvik (women), ranked within gender. \\u0394 = us \\u2212 them.</p>
+    <div class="scroll"><table class="ratings"><thead><tr>
       <th>Rk</th><th></th><th class="l">Team</th>
-      <th>Our AdjEM</th><th>Off <span class="sub">AdjOE</span></th><th>Def <span class="sub">AdjDE</span></th><th>Tempo</th>
-      <th>Their AdjEM <span class="sub">KP / Torvik</span></th><th>Their Rk</th>
-      <th>\\u0394 EM <span class="sub">us \\u2212 them</span></th><th>\\u0394 Rk</th>
+      <th>Our EM</th><th>OE</th><th>DE</th><th>Tempo</th>
+      <th>Their EM <span class="sub">KP/Tvk</span></th><th>Their #</th>
+      <th>\\u0394 EM</th><th>\\u0394 #</th>
     </tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 

@@ -45,6 +45,18 @@ def _name(name_map: dict[int, str], tid: Any) -> str:
     return name_map.get(int(tid), f"#{int(tid)}")
 
 
+def _abbr(name: str) -> str:
+    """A short team label for the score cells: initials for multi-word names, else a truncation.
+
+    "South Florida" → "SF", "Wichita St" → "WS", "Connecticut" → "Conn". The full name is always
+    in the matchup column, so this only needs to disambiguate the two teams at a glance.
+    """
+    words = [w for w in name.replace(".", "").split() if w]
+    if len(words) >= 2:
+        return "".join(w[0] for w in words[:3]).upper()
+    return name if len(name) <= 5 else name[:4]
+
+
 def _scores(total: float | None, margin: float | None) -> dict[str, int | None]:
     """Reconstruct the two team scores (A, B) from a predicted/actual total + margin (A − B)."""
     if total is None or margin is None:
@@ -70,10 +82,12 @@ def build_slate(predictions_log: pd.DataFrame, name_map: dict[int, str]) -> dict
         kp_margin = _num(d["cmp_margin"]) if has_cmp else None
         kp_total = _num(d.get("cmp_total")) if has_cmp else None
         act_margin, act_total = _num(d["Margin"]), _num(d["Total"])
+        a_name, b_name = _name(name_map, d["A_TeamID"]), _name(name_map, d["B_TeamID"])
         gap = None if (kp_margin is None or our_margin is None) else round(our_margin - kp_margin, 2)
+        gap_total = None if (kp_total is None or our_total is None) else round(our_total - kp_total, 1)
         game = {
-            "a": _name(name_map, d["A_TeamID"]),
-            "b": _name(name_map, d["B_TeamID"]),
+            "a": a_name, "b": b_name,
+            "a_abbr": _abbr(a_name), "b_abbr": _abbr(b_name),
             "gender": "W" if int(d.get("men_women", 0)) == 1 else "M",
             # Each predictor carries reconstructed team scores (a, b), win prob P(A wins), margin.
             "our": {**_scores(our_total, our_margin), "prob": _num(d["pred_prob"], 3), "margin": our_margin},
@@ -81,7 +95,8 @@ def build_slate(predictions_log: pd.DataFrame, name_map: dict[int, str]) -> dict
                 **_scores(kp_total, kp_margin), "prob": _num(d.get("cmp_prob"), 3), "margin": kp_margin},
             "actual": {**_scores(act_total, act_margin), "margin": act_margin,
                        "won": None if pd.isna(d["Outcome"]) else int(d["Outcome"])},
-            "gap_margin": gap,
+            "gap_margin": gap,   # our margin − KenPom's (spread disagreement; the sort key)
+            "gap_total": gap_total,  # our total − KenPom's (total disagreement)
         }
         slate.setdefault(_iso(d["game_date"]), []).append(game)
 
