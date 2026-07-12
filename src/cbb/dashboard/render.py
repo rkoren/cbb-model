@@ -98,6 +98,13 @@ _TEMPLATE = """<!DOCTYPE html>
   .ctitle { fill: var(--fg); font-size: 11px; font-weight: 600; }
   .legend2 { display: flex; gap: 1rem; font-size: .78rem; margin-top: .3rem; color: var(--muted); }
   .legend2 i { display: inline-block; width: .8rem; height: .18rem; border-radius: 2px; vertical-align: middle; margin-right: .3rem; }
+  .odds { margin-top: .8rem; }
+  .odds td, .odds th { border-bottom: 1px solid var(--line); }
+  .drow { display: flex; align-items: center; gap: .5rem; font-size: .82rem; margin: .28rem 0; }
+  .dl { flex: 0 0 11rem; color: var(--fg); }
+  .dbarwrap { flex: 1; position: relative; height: 12px; }
+  .dbar { position: absolute; top: 1px; height: 10px; border-radius: 2px; }
+  .dv { flex: 0 0 2.6rem; text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
   .hidden { display: none; }
 </style>
 </head>
@@ -133,6 +140,7 @@ const DATA = __DATA__;
 let activeDate = DATA.slate_dates.length ? DATA.slate_dates[DATA.slate_dates.length - 1] : null;
 let gender = "all";
 let view = "slate";
+let slateGames = [];
 
 const $ = (id) => document.getElementById(id);
 const DASH = "\\u2013";
@@ -189,8 +197,9 @@ function daySummary(games) {
 
 function renderSlate() {
   const games = (DATA.slate[activeDate] || []).filter(g => gender === "all" || g.gender === gender);
+  slateGames = games;   // for the game-detail drill-down (index-addressable)
   if (!games.length) { $("slateView").innerHTML = '<p class="empty">No games on this date.</p>'; return; }
-  const rows = games.map(g => `<tr>
+  const rows = games.map((g, i) => `<tr class="clickable" data-gidx="${i}">
     <td class="l matchup"><span class="badge">${g.gender}</span>${g.a} vs ${g.b}</td>
     <td>${scoreCell(g.kp, g.a_abbr, g.b_abbr, true)}</td>
     <td>${scoreCell(g.our, g.a_abbr, g.b_abbr, true)}</td>
@@ -211,7 +220,7 @@ function renderSlate() {
     <b>Spread \\u0394</b> = our margin \\u2212 KenPom's, <b>Total \\u0394</b> = our total \\u2212 KenPom's
     (rows sorted by the biggest spread disagreement).
     In the day summary, <span class="good">green</span> marks the model closer to the final (smaller avg miss).
-    KenPom FanMatch covers men's games only \\u2014 women show \\u2014.</p>`;
+    KenPom FanMatch covers men's games only \\u2014 women show \\u2014. Click a game for its detail + feature drivers.</p>`;
 }
 
 function renderRatings() {
@@ -314,6 +323,42 @@ function showTrajectory(team, gen) {
 }
 function closeDetail() { $("detail").classList.add("hidden"); }
 
+// DASH-006 game detail: spread/total/moneyline vs KenPom vs actual + XGBoost feature drivers.
+function moneyline(p) {
+  if (p === null || p === undefined) return "";
+  const o = p >= 0.5 ? Math.round(-100 * p / (1 - p)) : Math.round(100 * (1 - p) / p);
+  return " <span class=\\"wp\\">(" + (o > 0 ? "+" : "") + o + ")</span>";
+}
+function showGame(idx) {
+  const g = slateGames[idx]; if (!g) return;
+  const tot = p => (p && p.a !== null && p.a !== undefined) ? (p.a + p.b) : null;
+  const line = (name, p, withProb) => {
+    if (!p || p.a === null || p.a === undefined) return "<tr><td class=\\"l\\">" + name + "</td><td>\\u2014</td><td>\\u2014</td><td>\\u2014</td></tr>";
+    const wp = withProb && p.prob !== null && p.prob !== undefined ? Math.round(p.prob * 100) + "%" + moneyline(p.prob) : "\\u2014";
+    return "<tr><td class=\\"l\\">" + name + "</td><td>" + signed(p.margin, 1) + "</td><td>" + tot(p) + "</td><td>" + wp + "</td></tr>";
+  };
+  const fav = (g.our.margin >= 0) ? g.a : g.b;
+  const drivers = g.drivers || [];
+  const mx = Math.max(1, ...drivers.map(d => Math.abs(d.v)));
+  const bars = drivers.length ? drivers.map(d => {
+    const w = (Math.abs(d.v) / mx) * 100, col = d.v >= 0 ? "var(--pos)" : "var(--neg)";
+    const left = d.v >= 0 ? "50%" : (50 - w / 2) + "%";
+    return '<div class="drow"><span class="dl">' + d.l + '</span><span class="dbarwrap">'
+      + '<span class="dbar" style="left:' + left + '; width:' + (w / 2) + '%; background:' + col + '"></span></span>'
+      + '<span class="dv">' + (d.v > 0 ? "+" : "") + d.v + "</span></div>";
+  }).join("") : '<div class="snapnote">No driver breakdown for this game.</div>';
+  $("detailCard").innerHTML = '<button class="close" onclick="closeDetail()" title="close">\\u00d7</button>'
+    + "<h2>" + g.a + " vs " + g.b + "</h2>"
+    + '<div class="snapnote">Spread is margin (A\\u2212B); moneyline in parentheses.</div>'
+    + '<div class="scroll odds"><table><thead><tr><th class="l"></th><th>Spread</th><th>Total</th><th>Win% (moneyline)</th></tr></thead><tbody>'
+    + line("Our model", g.our, true) + line("KenPom", g.kp, true) + line("Final", g.actual, false)
+    + "</tbody></table></div>"
+    + '<div class="mgroup">Why our model favored ' + fav + ' \\u2014 top feature drivers</div>'
+    + '<div class="snapnote">Contribution to the predicted margin (+ leans ' + g.a + ", \\u2212 leans " + g.b + ").</div>"
+    + bars;
+  $("detail").classList.remove("hidden");
+}
+
 function setDate(d) { activeDate = d; $("clock").textContent = d || "\\u2014"; $("datePick").value = d; renderSlate(); renderRatings(); }
 function setView(v) {
   view = v;
@@ -341,6 +386,10 @@ function init() {
   $("ratingsView").addEventListener("click", (e) => {
     const tr = e.target.closest("tr[data-team]");
     if (tr) showTrajectory(tr.dataset.team, tr.dataset.gen);
+  });
+  $("slateView").addEventListener("click", (e) => {
+    const tr = e.target.closest("tr[data-gidx]");
+    if (tr) showGame(+tr.dataset.gidx);
   });
   renderMetrics();
   setView("slate");
