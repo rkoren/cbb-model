@@ -46,6 +46,12 @@ def test_slate_reconstructs_team_scores_from_total_and_margin():
     assert g["our"]["prob"] == 0.70
 
 
+def test_slate_carries_abbreviations_and_total_gap():
+    g = build_slate(_pred([_slate_row()]), {1101: "South Florida", 1102: "Connecticut"})["2026-03-01"][0]
+    assert g["a_abbr"] == "SF" and g["b_abbr"] == "Conn"     # multi-word → initials; single → trunc
+    assert g["gap_total"] == -3.0                            # our total 148 − KenPom 151
+
+
 def test_slate_gap_is_us_minus_kenpom_and_sorts_by_magnitude():
     log = _pred([
         _slate_row(A_TeamID=1101, B_TeamID=1102, pred_margin=6.0, cmp_margin=3.0),   # gap +3
