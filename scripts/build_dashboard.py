@@ -24,6 +24,7 @@ from cbb.benchmark.slate import fanmatch_to_comparator
 from cbb.data import normalize_games
 from cbb.dashboard import build_payload, render_html
 from cbb.dashboard.wiring import (
+    add_conf_game,
     add_game_date,
     attach_kenpom_slate,
     build_gendered_ratings_log,
@@ -120,6 +121,9 @@ def build(season: int) -> None:
         print(f"KenPom comparator: {int(log['cmp_margin'].notna().sum()):,} games matched")
     else:
         print("KenPom comparator: no FanMatch cache — slate renders us vs actual only")
+
+    # In/non-conference flag for the metrics segments (DASH-005).
+    log = add_conf_game(log, _read_csv("MTeamConferences"), _read_csv("WTeamConferences"))
 
     LOG_OUT.parent.mkdir(parents=True, exist_ok=True)
     log.to_parquet(LOG_OUT, index=False)
