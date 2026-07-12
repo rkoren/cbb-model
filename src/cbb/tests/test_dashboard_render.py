@@ -53,3 +53,11 @@ def test_render_has_no_nan_and_single_script_close():
 def test_hostile_team_name_cannot_break_out_of_script():
     html = render_html(_payload(names={1102: "</script><script>x"}))
     assert html.count("</script>") == 1            # the guard escaped the injected close tag
+
+
+def test_render_wires_trajectory_drilldown():
+    html = render_html(_payload())
+    # DASH-006: clickable ratings rows (data-attr, not inline onclick) + the chart/detail machinery.
+    for marker in ("function lineChart", "function showTrajectory", "data-team=",
+                   'id="detail"', "#detail.hidden"):   # the specificity override that keeps it hidden
+        assert marker in html, marker
