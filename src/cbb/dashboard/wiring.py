@@ -96,6 +96,26 @@ def build_name_map(*team_frames: pd.DataFrame | None) -> dict[int, str]:
     return m
 
 
+def add_conf_game(log: pd.DataFrame, *conf_frames: pd.DataFrame | None) -> pd.DataFrame:
+    """Add a ``conf_game`` bool: both teams in the same conference that season (in-conference play).
+
+    ``conf_frames`` are Kaggle ``MTeamConferences``/``WTeamConferences`` (Season, TeamID,
+    ConfAbbrev). NaN (rather than False) when either team's conference is unknown, so it's
+    excluded from the conf/non-conf split instead of mislabelled.
+    """
+    conf: dict[tuple[int, int], str] = {}
+    for df in conf_frames:
+        if df is None:
+            continue
+        for r in df.itertuples(index=False):
+            conf[(int(r.Season), int(r.TeamID))] = r.ConfAbbrev
+    ca = [conf.get((int(s), int(a))) for s, a in zip(log["Season"], log["A_TeamID"])]
+    cb = [conf.get((int(s), int(b))) for s, b in zip(log["Season"], log["B_TeamID"])]
+    out = log.copy()
+    out["conf_game"] = [None if (x is None or y is None) else (x == y) for x, y in zip(ca, cb)]
+    return out
+
+
 def ratings_frame_to_comparator(
     df: pd.DataFrame,
     name_map: dict[str, int],

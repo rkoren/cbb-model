@@ -6,6 +6,7 @@ import pytest
 from cbb.benchmark.ratings_log import COMPARATOR_COLS as RATINGS_COMPARATOR_COLS
 from cbb.benchmark.slate import COMPARATOR_COLS
 from cbb.dashboard.wiring import (
+    add_conf_game,
     add_game_date,
     attach_kenpom_slate,
     build_gendered_ratings_log,
@@ -119,6 +120,15 @@ def test_build_gendered_ratings_log_ranks_within_gender():
     r = log.set_index("TeamID")["our_rank"]
     assert r[1101] == 1 and r[1102] == 2          # men ranked among men
     assert r[3101] == 1 and r[3102] == 2          # women ranked among women (not 1..4 pooled)
+
+
+def test_add_conf_game_flags_same_conference():
+    log = pd.DataFrame({"Season": [2026, 2026, 2026],
+                        "A_TeamID": [1101, 1101, 1101], "B_TeamID": [1102, 1103, 9999]})
+    conf = pd.DataFrame({"Season": [2026] * 3, "TeamID": [1101, 1102, 1103],
+                         "ConfAbbrev": ["acc", "acc", "big"]})
+    out = add_conf_game(log, conf)
+    assert out["conf_game"].tolist() == [True, False, None]   # same conf / diff conf / unknown team
 
 
 def test_build_name_map_merges_frames():

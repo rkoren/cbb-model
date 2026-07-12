@@ -132,6 +132,75 @@ def build_ratings(ratings_log: pd.DataFrame, name_map: dict[int, str]) -> dict[s
     return ratings
 
 
+def _mae(pred: pd.Series, actual: pd.Series) -> float:
+    return float((pred - actual).abs().mean())
+
+
+def _brier(prob: pd.Series, outcome: pd.Series) -> float:
+    return float(((prob - outcome) ** 2).mean())
+
+
+def _win_acc(prob: pd.Series, outcome: pd.Series) -> float:
+    """Fraction of games where the predicted favourite (prob ≥ .5) actually won."""
+    return float(((prob >= 0.5).astype(int) == outcome).mean())
+
+
+def _seg_row(label: str, sub: pd.DataFrame) -> dict[str, Any]:
+    """One segment's us-vs-KenPom accuracy over ``sub`` (men's games with a KenPom line + final)."""
+    return {
+        "label": label,
+        "n": int(len(sub)),
+        "us": {"margin": _num(_mae(sub["pred_margin"], sub["Margin"]), 1),
+               "total": _num(_mae(sub["pred_total"], sub["Total"]), 1),
+               "brier": _num(_brier(sub["pred_prob"], sub["Outcome"]), 3),
+               "acc": _num(_win_acc(sub["pred_prob"], sub["Outcome"]), 3)},
+        "kp": {"margin": _num(_mae(sub["cmp_margin"], sub["Margin"]), 1),
+               "total": _num(_mae(sub["cmp_total"], sub["Total"]), 1),
+               "brier": _num(_brier(sub["cmp_prob"], sub["Outcome"]), 3),
+               "acc": _num(_win_acc(sub["cmp_prob"], sub["Outcome"]), 3)},
+    }
+
+
+def build_metrics(predictions_log: pd.DataFrame) -> dict[str, Any]:
+    """Season accuracy vs the market (DASH-005), sliced by segment.
+
+    KenPom FanMatch covers men only, so this is computed over men's games that have both a KenPom
+    line and a final — the apples-to-apples set where "vs the market" is meaningful. Both our and
+    KenPom's margin/total MAE, Brier, and win-accuracy are reported per segment.
+    """
+    df = predictions_log
+    df = df[df["cmp_margin"].notna() & df["Outcome"].notna()].copy() if "cmp_margin" in df else df.iloc[:0]
+    if df.empty:
+        return {"n_games": 0, "groups": []}
+    df["_amargin"] = df["Margin"].abs()
+    df["_pmargin"] = df["pred_margin"].abs()
+    df["_ym"] = pd.to_datetime(df["game_date"]).dt.strftime("%Y-%m")
+
+    groups: list[dict[str, Any]] = [{"name": "Overall", "rows": [_seg_row("All men's games", df)]}]
+
+    months = [(ym, g) for ym, g in df.groupby("_ym")]
+    groups.append({"name": "By month", "rows": [
+        _seg_row(pd.Timestamp(ym + "-01").strftime("%b %Y"), g) for ym, g in sorted(months)]})
+
+    comp = pd.cut(df["_amargin"], [-1, 8, 16, 1e9], labels=["Close (≤8)", "Medium (9–16)", "Blowout (>16)"])
+    groups.append({"name": "By final margin", "rows": [
+        _seg_row(str(lbl), df[comp == lbl]) for lbl in comp.cat.categories if (comp == lbl).any()]})
+
+    fav = pd.cut(df["_pmargin"], [-1, 4, 12, 1e9], labels=["Toss-up (≤4)", "Moderate (5–12)", "Big favorite (>12)"])
+    groups.append({"name": "By our predicted spread", "rows": [
+        _seg_row(str(lbl), df[fav == lbl]) for lbl in fav.cat.categories if (fav == lbl).any()]})
+
+    if "conf_game" in df.columns and df["conf_game"].notna().any():
+        rows = []
+        for flag, lbl in [(True, "In-conference"), (False, "Non-conference")]:
+            sub = df[df["conf_game"] == flag]
+            if len(sub):
+                rows.append(_seg_row(lbl, sub))
+        groups.append({"name": "By conference", "rows": rows})
+
+    return {"n_games": int(len(df)), "groups": groups}
+
+
 def build_payload(
     predictions_log: pd.DataFrame,
     ratings_log: pd.DataFrame,
@@ -140,11 +209,13 @@ def build_payload(
 ) -> dict[str, Any]:
     """Assemble the full dashboard payload from the two DASH-001 logs.
 
-    Returns a JSON-serializable dict: ``slate`` (by game date) and ``ratings`` (by snapshot date),
-    plus the sorted date domains the shared clock scrubs over and a small ``meta`` block.
+    Returns a JSON-serializable dict: ``slate`` (by game date), ``ratings`` (by snapshot date), and
+    season ``metrics`` (DASH-005), plus the sorted date domains the shared clock scrubs over and a
+    small ``meta`` block.
     """
     slate = build_slate(predictions_log, name_map)
     ratings = build_ratings(ratings_log, name_map)
+    metrics = build_metrics(predictions_log)
     return {
         "meta": {
             "generated": generated,
@@ -155,4 +226,5 @@ def build_payload(
         "rating_dates": sorted(ratings),   # weekly snapshots
         "slate": slate,
         "ratings": ratings,
+        "metrics": metrics,
     }

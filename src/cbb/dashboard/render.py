@@ -75,6 +75,10 @@ _TEMPLATE = """<!DOCTYPE html>
   .legend { color: var(--muted); font-size: .76rem; margin: .7rem .2rem 0; line-height: 1.5; }
   .empty { color: var(--muted); padding: 1.25rem; text-align: center; }
   .snapnote { color: var(--muted); font-size: .78rem; margin: 0 .2rem .5rem; }
+  .mgroup { font-size: .8rem; text-transform: uppercase; letter-spacing: .05em; color: var(--muted);
+    margin: 1.4rem .2rem .5rem; font-weight: 700; }
+  .mgroup:first-of-type { margin-top: .3rem; }
+  .vs { color: var(--faint); }
   .hidden { display: none; }
 </style>
 </head>
@@ -96,10 +100,12 @@ _TEMPLATE = """<!DOCTYPE html>
     <span class="tabs">
       <button class="tab" id="tabSlate" aria-selected="true">FanMatch</button>
       <button class="tab" id="tabRatings" aria-selected="false">Ratings</button>
+      <button class="tab" id="tabMetrics" aria-selected="false">Metrics</button>
     </span>
   </div>
   <div id="slateView"></div>
   <div id="ratingsView" class="hidden"></div>
+  <div id="metricsView" class="hidden"></div>
   </div>
 
 <script>
@@ -206,13 +212,47 @@ function renderRatings() {
     </tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 
+// Season accuracy vs the market (DASH-005): season-wide, independent of the date clock.
+function renderMetrics() {
+  const m = DATA.metrics;
+  if (!m || !m.n_games) { $("metricsView").innerHTML = '<p class="empty">No KenPom-covered games to score.</p>'; return; }
+  const cell = (u, k, digits, lowerBetter) => {
+    if (u === null || u === undefined) return '<span class="muted">\\u2014</span>';
+    let c = "";
+    if (k !== null && k !== undefined && u !== k) c = (lowerBetter ? u < k : u > k) ? "good" : "bad";
+    const kp = (k === null || k === undefined) ? "\\u2014" : k.toFixed(digits);
+    return '<span class="' + c + '">' + u.toFixed(digits) + '</span> <span class="vs">/ ' + kp + "</span>";
+  };
+  const pct = (v) => v === null || v === undefined ? null : v * 100;
+  let html = '<p class="snapnote">Season accuracy vs KenPom FanMatch \\u2014 men\\'s games with a market line ('
+    + m.n_games + ' games). Each cell is <b>us</b> / KenPom; <span class="good">green</span> = we\\'re closer.</p>';
+  for (const g of m.groups) {
+    const rows = g.rows.map(r => `<tr>
+      <td class="l">${r.label}</td><td>${r.n}</td>
+      <td>${cell(r.us.margin, r.kp.margin, 1, true)}</td>
+      <td>${cell(r.us.total, r.kp.total, 1, true)}</td>
+      <td>${cell(r.us.brier, r.kp.brier, 3, true)}</td>
+      <td>${cell(pct(r.us.acc), pct(r.kp.acc), 0, false)}</td></tr>`).join("");
+    html += `<div class="mgroup">${g.name}</div><div class="scroll"><table>
+      <thead><tr><th class="l">Segment</th><th>Games</th>
+      <th>Margin MAE <span class="sub">us / KP</span></th>
+      <th>Total MAE <span class="sub">us / KP</span></th>
+      <th>Brier <span class="sub">us / KP</span></th>
+      <th>Win% <span class="sub">us / KP</span></th></tr></thead>
+      <tbody>${rows}</tbody></table></div>`;
+  }
+  $("metricsView").innerHTML = html;
+}
+
 function setDate(d) { activeDate = d; $("clock").textContent = d || "\\u2014"; $("datePick").value = d; renderSlate(); renderRatings(); }
 function setView(v) {
   view = v;
   $("tabSlate").setAttribute("aria-selected", v === "slate");
   $("tabRatings").setAttribute("aria-selected", v === "ratings");
+  $("tabMetrics").setAttribute("aria-selected", v === "metrics");
   $("slateView").classList.toggle("hidden", v !== "slate");
   $("ratingsView").classList.toggle("hidden", v !== "ratings");
+  $("metricsView").classList.toggle("hidden", v !== "metrics");
 }
 
 function init() {
@@ -225,6 +265,8 @@ function init() {
   $("datePick").onchange = (e) => setDate(e.target.value);
   $("gender").onchange = (e) => { gender = e.target.value; renderSlate(); renderRatings(); };
   $("tabSlate").onclick = () => setView("slate"); $("tabRatings").onclick = () => setView("ratings");
+  $("tabMetrics").onclick = () => setView("metrics");
+  renderMetrics();
   setView("slate");
   if (activeDate) setDate(activeDate); else $("slateView").innerHTML = '<p class="empty">No data.</p>';
 }

@@ -10,7 +10,7 @@ import math
 import pandas as pd
 import pytest
 
-from cbb.dashboard.payload import build_payload, build_slate
+from cbb.dashboard.payload import build_metrics, build_payload, build_slate
 
 NAMES = {1101: "Duke", 1102: "Kansas", 1103: "Iowa"}
 
@@ -129,3 +129,25 @@ def test_ratings_sorted_by_our_rank():
     ])
     teams = build_payload(_pred([_slate_row()]), rates, NAMES)["ratings"]["2026-03-01"]
     assert [t["our"]["rank"] for t in teams] == [1, 3]
+
+
+# ── DASH-005 metrics ──────────────────────────────────────────────────────────────
+
+def test_build_metrics_computes_us_vs_kenpom_maes():
+    log = _pred([
+        _slate_row(game_date="2026-01-05", pred_margin=6.0, cmp_margin=4.0, Margin=8.0),
+        _slate_row(game_date="2026-02-05", pred_margin=2.0, cmp_margin=5.0, Margin=0.0, Outcome=0),
+    ])
+    m = build_metrics(log)
+    assert m["n_games"] == 2
+    overall = next(g for g in m["groups"] if g["name"] == "Overall")["rows"][0]
+    assert overall["n"] == 2
+    assert overall["us"]["margin"] == 2.0    # mean(|6−8|, |2−0|)
+    assert overall["kp"]["margin"] == 4.5    # mean(|4−8|, |5−0|)
+    names = [g["name"] for g in m["groups"]]
+    assert "By month" in names and "By final margin" in names
+
+
+def test_build_metrics_empty_without_kenpom():
+    log = _pred([{k: v for k, v in _slate_row().items() if not k.startswith("cmp_")}])
+    assert build_metrics(log) == {"n_games": 0, "groups": []}
