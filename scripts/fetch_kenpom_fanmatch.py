@@ -25,7 +25,11 @@ from cbb.kenpom import KenPomClient  # noqa: E402
 
 FANMATCH_DIR = Path("data/kenpom/fanmatch")
 KEEP = ["DateOfGame", "Visitor", "Home", "HomePred", "VisitorPred", "HomeWP", "PredTempo"]
-FIRST_DAYNUM, LAST_DAYNUM = 0, 132  # DayZero (early Nov) → Selection Sunday
+# DayZero (early Nov) → through the NCAA tournament (~DayNum 154). The KenPom `fanmatch` endpoint
+# takes a past date, so tournament FanMatch fetches exactly like the regular season — this range
+# just extends past Selection Sunday (DayNum ~132) so the dashboard's tournament view has a KenPom
+# comparator. Re-run for a season to backfill its bracket; already-cached dates are skipped.
+FIRST_DAYNUM, LAST_DAYNUM = 0, 154
 
 
 def main() -> None:

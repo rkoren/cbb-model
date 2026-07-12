@@ -36,6 +36,9 @@ from cbb.dashboard.wiring import (
     ratings_frame_to_comparator,
 )
 from cbb.features.adjself_asof import compute_adjself_asof_snapshots
+from cbb.features.reg_games import build_reg_games
+from cbb.features.torvik_asof import load_all_torvik_women
+from cbb.kenpom.asof_features import load_all_archive_snapshots
 from cbb.kenpom.features import build_team_name_map
 from cbb.train.reg_model import RegConfig, build_reg_predictions_log, train_reg_loto
 
@@ -58,6 +61,7 @@ FEATURE_LABELS = {
 DATA = Path("data/processed")
 RAW = Path("data/raw")
 KP = Path("data/kenpom")
+TOURN_DAYNUM = 134  # tournament games start after Selection Sunday (~DayNum 133)
 OUT = Path("monitoring/handicapper.html")
 LOG_OUT = DATA / "reg_predictions_log.parquet"
 
@@ -118,24 +122,106 @@ def _ratings_comparator(season: int) -> pd.DataFrame:
     return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
 
 
-def _feature_drivers(reg_games: pd.DataFrame, model, season: int, top: int = 5) -> dict:
-    """Top XGBoost margin contributions per 2026 game → why the model favoured a side (DASH-006).
+def _driver_list(frame: pd.DataFrame, model, top: int = 5) -> list:
+    """Top XGBoost margin contributions per row (SHAP-style pred_contribs), aligned to ``frame``.
 
-    ``pred_contribs`` gives SHAP-style per-feature contributions to the predicted margin (A−B), so
-    + leans A, − leans B. The 2026 slate is scored by this same production model, so the drivers
-    explain exactly the predictions the FanMatch page shows. Keyed by the game's identity tuple.
+    + leans A, − leans B. The frame is scored by the same production model, so the drivers explain
+    exactly the predictions shown. Returns one ``[{l, v}, ...]`` list per row.
     """
-    g = dedupe_symmetric(reg_games[reg_games["Season"] == season]).reset_index(drop=True)
     feats = model.margin_features
-    contribs = model.margin_booster.predict(xgb.DMatrix(g[feats].fillna(0).to_numpy()), pred_contribs=True)
+    contribs = model.margin_booster.predict(xgb.DMatrix(frame[feats].fillna(0).to_numpy()), pred_contribs=True)
     labels = [FEATURE_LABELS.get(f, f) for f in feats]
-    out: dict = {}
-    for i, r in enumerate(g.itertuples(index=False)):
-        c = contribs[i][:-1]   # drop the bias term
-        idx = np.argsort(-np.abs(c))[:top]
-        out[(int(r.Season), int(r.DayNum), int(r.A_TeamID), int(r.B_TeamID))] = [
-            {"l": labels[j], "v": round(float(c[j]), 1)} for j in idx if abs(c[j]) >= 0.1]
+    out = []
+    for c in contribs:
+        cc = c[:-1]   # drop the bias term
+        idx = np.argsort(-np.abs(cc))[:top]
+        out.append([{"l": labels[j], "v": round(float(cc[j]), 1)} for j in idx if abs(cc[j]) >= 0.1])
     return out
+
+
+def _feature_drivers(reg_games: pd.DataFrame, model, season: int, top: int = 5) -> dict:
+    """DASH-006 drivers keyed by game identity (for the reg-season slate, whose row order differs)."""
+    g = dedupe_symmetric(reg_games[reg_games["Season"] == season]).reset_index(drop=True)
+    dl = _driver_list(g, model, top)
+    return {(int(r.Season), int(r.DayNum), int(r.A_TeamID), int(r.B_TeamID)): dl[i]
+            for i, r in enumerate(g.itertuples(index=False))}
+
+
+def _build_tournament_games(season: int) -> pd.DataFrame:
+    """Season's tournament games with Selection-Sunday-as-of features + actuals (offline, no API).
+
+    Mirrors scripts/benchmark_tournament.py (GM-007): append the tournament results to the raw reg
+    log, rebuild reg-games, and take rows DayNum ≥ 134 — their as-of features are then computed on
+    the full regular season (no tournament results leak into the ratings), and each row carries the
+    real Margin/Total/Outcome. Team→ID maps are built from the cached archive/Torvik names (no API).
+    """
+    def _rd(name, enc=None):
+        return pd.read_csv(RAW / f"{name}.csv", encoding=enc)
+
+    data = {"M_reg_raw": _rd("MRegularSeasonDetailedResults"), "W_reg_raw": _rd("WRegularSeasonDetailedResults"),
+            "M_teams": _rd("MTeams"), "W_teams": _rd("WTeams")}
+    combined = dict(data)
+    combined["M_reg_raw"] = pd.concat([data["M_reg_raw"], _rd("MNCAATourneyDetailedResults")], ignore_index=True)
+    combined["W_reg_raw"] = pd.concat([data["W_reg_raw"], _rd("WNCAATourneyDetailedResults")], ignore_index=True)
+    seasons = sorted(set(combined["M_reg_raw"].Season) | set(combined["W_reg_raw"].Season))
+
+    mspell, wspell = _rd("MTeamSpellings", "latin-1"), _rd("WTeamSpellings", "latin-1")
+    m_maps = {s: build_team_name_map(
+        data["M_teams"], pd.read_parquet(KP / "archive" / f"kenpom_archive_{s}.parquet")[["TeamName"]].drop_duplicates(), mspell)
+        for s in seasons if (KP / "archive" / f"kenpom_archive_{s}.parquet").exists()}
+    w_maps = {s: build_team_name_map(
+        data["W_teams"], pd.read_parquet(Path("data/torvik") / f"torvik_women_{s}.parquet").rename(
+            columns={"team": "TeamName"})[["TeamName"]].drop_duplicates(), wspell)
+        for s in seasons if (Path("data/torvik") / f"torvik_women_{s}.parquet").exists()}
+    dayzero_s = dict(zip(_rd("MSeasons").Season, pd.to_datetime(_rd("MSeasons").DayZero)))
+
+    kp = load_all_archive_snapshots(seasons, KP / "archive", m_maps)
+    tv = load_all_torvik_women(seasons, Path("data/torvik"), w_maps)
+    games = build_reg_games(combined, pd.read_parquet(DATA / "adj_eff.parquet"),
+                            asof_snapshots=kp, dayzero_by_season=dayzero_s, torvik_women_snapshots=tv)
+    return dedupe_symmetric(games[(games["DayNum"] >= TOURN_DAYNUM) & (games["Season"] == season)]).reset_index(drop=True)
+
+
+def build_tournament(season: int) -> None:
+    """Render a season's NCAA-tournament bracket to monitoring/handicapper_<season>_tourney.html."""
+    model = train_reg_loto(pd.read_parquet(DATA / "reg_games.parquet"), RegConfig()).model
+    t = _build_tournament_games(season)
+    if t.empty:
+        raise SystemExit(f"no tournament games for {season} — need {season} rows in "
+                         "M/W NCAATourneyDetailedResults (2026 results aren't in Kaggle yet)")
+    feats = model.margin_features + model.total_features
+    t[feats] = t[feats].fillna(0)
+    ps = model.predict_scores(t)
+    slate = pd.DataFrame({
+        "Season": t["Season"].to_numpy(), "DayNum": t["DayNum"].to_numpy(), "men_women": t["men_women"].to_numpy(),
+        "A_TeamID": t["A_TeamID"].to_numpy(), "B_TeamID": t["B_TeamID"].to_numpy(),
+        "pred_margin": ps["pred_margin"].to_numpy(), "pred_total": ps["pred_total"].to_numpy(),
+        "pred_prob": model.predict_batch(t),
+        "Margin": t["Margin"].to_numpy(), "Total": t["Total"].to_numpy(), "Outcome": t["Outcome"].to_numpy(),
+    })
+    dayzero = dayzero_by_gender_season(_read_csv("MSeasons"), _read_csv("WSeasons"))
+    slate = add_game_date(slate, dayzero)
+
+    comparator = _kenpom_comparator(season, dayzero)   # only matches if the FanMatch cache covers tourney dates
+    if comparator is not None and attach_kenpom_slate(slate, comparator)["cmp_margin"].notna().any():
+        slate = attach_kenpom_slate(slate, comparator)
+        print(f"KenPom comparator: {int(slate['cmp_margin'].notna().sum()):,} tournament games matched")
+    else:
+        print("KenPom comparator: FanMatch cache doesn't cover the tournament — us vs actual only "
+              "(extend fetch_kenpom_fanmatch.py past Selection Sunday to add it)")
+    slate = add_conf_game(slate, _read_csv("MTeamConferences"), _read_csv("WTeamConferences"))
+    slate["drivers"] = _driver_list(t, model)
+    print(f"tournament games: {len(slate)} ({int((slate['men_women'] == 0).sum())} men "
+          f"+ {int((slate['men_women'] == 1).sum())} women)")
+
+    ours = _our_ratings(season, dayzero[(season, 0)])
+    ratings_log = build_gendered_ratings_log(ours, _ratings_comparator(season))
+    name_map = build_name_map(_read_csv("MTeams"), _read_csv("WTeams"))
+    payload = build_payload(slate, ratings_log, name_map, generated=date.today().isoformat())
+    out = Path(f"monitoring/handicapper_{season}_tourney.html")
+    out.write_text(render_html(payload))
+    print(f"dashboard: {payload['meta']['n_games']} tournament games, "
+          f"{payload['meta']['n_snapshots']} rating snapshots → {out}")
 
 
 def build(season: int) -> None:
@@ -194,7 +280,13 @@ def build(season: int) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description="Build the handicapper dashboard HTML")
     ap.add_argument("--season", type=int, default=2026, help="Season to render on the slate (default 2026)")
-    build(ap.parse_args().season)
+    ap.add_argument("--tournament", action="store_true",
+                    help="Render the season's NCAA tournament bracket instead of the regular season")
+    args = ap.parse_args()
+    if args.tournament:
+        build_tournament(args.season)
+    else:
+        build(args.season)
 
 
 if __name__ == "__main__":
