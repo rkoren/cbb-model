@@ -28,10 +28,12 @@ _TEMPLATE = """<!DOCTYPE html>
     --bg:#fff; --panel:#fff; --fg:#0f172a; --muted:#64748b; --faint:#94a3b8;
     --line:#e5e7eb; --head:#f8fafc; --row-hover:#f8fafc;
     --pos:#059669; --neg:#dc2626; --accent:#4f46e5; --accent-soft:#eef2ff;
+    --s1:#2a78d6; --s2:#1baf7a;   /* trajectory series: ours / theirs (validated CVD-safe pair) */
   }
   @media (prefers-color-scheme: dark) {
     :root { --bg:#0b1120; --panel:#0f172a; --fg:#e5e9f0; --muted:#94a3b8; --faint:#64748b;
-      --line:#1e293b; --head:#131c2e; --row-hover:#131c2e; --accent:#818cf8; --accent-soft:#1e1b4b; }
+      --line:#1e293b; --head:#131c2e; --row-hover:#131c2e; --accent:#818cf8; --accent-soft:#1e1b4b;
+      --s1:#3987e5; --s2:#199e70; }
   }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--fg);
@@ -79,6 +81,23 @@ _TEMPLATE = """<!DOCTYPE html>
     margin: 1.4rem .2rem .5rem; font-weight: 700; }
   .mgroup:first-of-type { margin-top: .3rem; }
   .vs { color: var(--faint); }
+  tr.clickable { cursor: pointer; }
+  tr.clickable:hover td:first-child { box-shadow: inset 2px 0 0 var(--accent); }
+  #detail { position: fixed; inset: 0; background: rgba(2,6,23,.55); display: flex;
+    align-items: center; justify-content: center; padding: 1.5rem; z-index: 20; }
+  #detail.hidden { display: none; }   /* ID beats .hidden's class selector, so override explicitly */
+  #detailCard { background: var(--bg); border: 1px solid var(--line); border-radius: 14px;
+    max-width: 760px; width: 100%; max-height: 88vh; overflow-y: auto; padding: 1.2rem 1.4rem; }
+  #detailCard h2 { font-size: 1.05rem; margin: 0 0 .1rem; }
+  #detailCard .close { float: right; border: 1px solid var(--line); border-radius: 8px;
+    background: var(--panel); color: var(--fg); cursor: pointer; padding: .2rem .55rem; font-size: 1rem; }
+  .chartgrid { display: grid; grid-template-columns: 1fr 1fr; gap: .6rem; margin-top: .8rem; }
+  .chart { border: 1px solid var(--line); border-radius: 10px; padding: .3rem; }
+  .chart svg { display: block; width: 100%; height: auto; }
+  .clabel { fill: var(--muted); font-size: 10px; }
+  .ctitle { fill: var(--fg); font-size: 11px; font-weight: 600; }
+  .legend2 { display: flex; gap: 1rem; font-size: .78rem; margin-top: .3rem; color: var(--muted); }
+  .legend2 i { display: inline-block; width: .8rem; height: .18rem; border-radius: 2px; vertical-align: middle; margin-right: .3rem; }
   .hidden { display: none; }
 </style>
 </head>
@@ -107,6 +126,7 @@ _TEMPLATE = """<!DOCTYPE html>
   <div id="ratingsView" class="hidden"></div>
   <div id="metricsView" class="hidden"></div>
   </div>
+  <div id="detail" class="hidden"><div id="detailCard"></div></div>
 
 <script>
 const DATA = __DATA__;
@@ -116,6 +136,7 @@ let view = "slate";
 
 const $ = (id) => document.getElementById(id);
 const DASH = "\\u2013";
+const attr = (s) => String(s).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 const num = (v, d) => (v === null || v === undefined) ? null : (typeof v === "number" ? v.toFixed(d) : v);
 const em = (v, d) => { const s = num(v, d); return s === null ? '<span class="muted">\\u2014</span>' : s; };
 const signed = (v, d) => {
@@ -198,12 +219,12 @@ function renderRatings() {
   const all = rd ? DATA.ratings[rd] : null;
   const teams = all ? all.filter(t => gender === "all" || t.gender === gender) : null;
   if (!teams || !teams.length) { $("ratingsView").innerHTML = '<p class="empty">No ratings snapshot on or before this date.</p>'; return; }
-  const rows = teams.map(t => `<tr>
+  const rows = teams.map(t => `<tr class="clickable" data-team="${attr(t.team)}" data-gen="${t.gender}">
     <td>${em(t.our.rank, 0)}</td><td><span class="badge">${t.gender}</span></td><td class="l matchup">${t.team}</td>
     <td>${em(t.our.em, 1)}</td><td>${em(t.our.oe, 1)}</td><td>${em(t.our.de, 1)}</td><td>${em(t.our.tempo, 1)}</td>
     <td>${em(t.kp.em, 1)}</td><td>${em(t.kp.rank, 0)}</td>
     <td>${signed(t.d_em, 1)}</td><td>${signed(t.d_rank, 0)}</td></tr>`).join("");
-  $("ratingsView").innerHTML = `<p class="snapnote">Ratings as of ${rd} (latest snapshot \\u2264 ${activeDate}) \\u2014 our efficiency vs KenPom (men) / Torvik (women), ranked within gender. \\u0394 = us \\u2212 them.</p>
+  $("ratingsView").innerHTML = `<p class="snapnote">Ratings as of ${rd} (latest snapshot \\u2264 ${activeDate}) \\u2014 our efficiency vs KenPom (men) / Torvik (women), ranked within gender. \\u0394 = us \\u2212 them. Click a team for its season trajectory.</p>
     <div class="scroll"><table class="ratings"><thead><tr>
       <th>Rk</th><th></th><th class="l">Team</th>
       <th>Our EM</th><th>OE</th><th>DE</th><th>Tempo</th>
@@ -244,6 +265,55 @@ function renderMetrics() {
   $("metricsView").innerHTML = html;
 }
 
+// DASH-006 team trajectory: a small inline-SVG line chart, ours (s1) vs theirs (s2).
+function lineChart(title, dates, us, them) {
+  const w = 340, h = 150, pad = { t: 22, r: 12, b: 20, l: 34 };
+  const all = us.concat(them).filter(v => v !== null && v !== undefined);
+  if (!all.length) return "";
+  let mn = Math.min(...all), mx = Math.max(...all);
+  const r = (mx - mn) || 1; mn -= r * 0.12; mx += r * 0.12;
+  const n = dates.length;
+  const X = i => pad.l + (n < 2 ? (w - pad.l - pad.r) / 2 : (i / (n - 1)) * (w - pad.l - pad.r));
+  const Y = v => pad.t + (1 - (v - mn) / (mx - mn)) * (h - pad.t - pad.b);
+  const draw = (arr, col) => {
+    let d = "", started = false, dots = "";
+    arr.forEach((v, i) => {
+      if (v === null || v === undefined) return;
+      d += (started ? "L" : "M") + X(i).toFixed(1) + " " + Y(v).toFixed(1) + " "; started = true;
+      dots += '<circle cx="' + X(i).toFixed(1) + '" cy="' + Y(v).toFixed(1) + '" r="2.2" fill="'
+        + col + '"><title>' + dates[i] + ": " + v.toFixed(1) + "</title></circle>";
+    });
+    return (d ? '<path d="' + d + '" fill="none" stroke="' + col + '" stroke-width="2" stroke-linejoin="round"/>' : "") + dots;
+  };
+  const grid = [mn, (mn + mx) / 2, mx].map(v =>
+    '<line x1="' + pad.l + '" x2="' + (w - pad.r) + '" y1="' + Y(v).toFixed(1) + '" y2="' + Y(v).toFixed(1) + '" stroke="var(--line)"/>'
+    + '<text class="clabel" x="' + (pad.l - 4) + '" y="' + (Y(v) + 3).toFixed(1) + '" text-anchor="end">' + v.toFixed(0) + "</text>").join("");
+  const xlab = '<text class="clabel" x="' + pad.l + '" y="' + (h - 5) + '">' + dates[0].slice(5) + "</text>"
+    + '<text class="clabel" x="' + (w - pad.r) + '" y="' + (h - 5) + '" text-anchor="end">' + dates[n - 1].slice(5) + "</text>";
+  return '<div class="chart"><svg viewBox="0 0 ' + w + " " + h + '" role="img" aria-label="' + title + '">'
+    + '<text class="ctitle" x="' + pad.l + '" y="13">' + title + "</text>"
+    + grid + xlab + draw(us, "var(--s1)") + draw(them, "var(--s2)") + "</svg></div>";
+}
+
+function showTrajectory(team, gen) {
+  // Build the team's series from the ratings already embedded in the payload — no extra data.
+  const dates = DATA.rating_dates.filter(d => (DATA.ratings[d] || []).some(t => t.team === team));
+  const ser = (side, m) => dates.map(d => {
+    const t = (DATA.ratings[d] || []).find(x => x.team === team); return t && t[side] ? t[side][m] : null;
+  });
+  const cmpName = gen === "W" ? "Torvik" : "KenPom";
+  const charts = [["AdjEM", "em"], ["Off (AdjOE)", "oe"], ["Def (AdjDE)", "de"], ["Tempo", "tempo"]]
+    .map(([lbl, m]) => lineChart(lbl, dates, ser("our", m), ser("kp", m))).join("");
+  $("detailCard").innerHTML = '<button class="close" onclick="closeDetail()" title="close">\\u00d7</button>'
+    + "<h2>" + team + "</h2>"
+    + '<div class="snapnote">Rating trajectory across the season \\u2014 ours vs ' + cmpName + ".</div>"
+    + '<div class="legend2"><span><i style="background:var(--s1)"></i>ours</span>'
+    + '<span><i style="background:var(--s2)"></i>' + cmpName + "</span></div>"
+    + '<div class="chartgrid">' + charts + "</div>";
+  $("detail").classList.remove("hidden");
+}
+function closeDetail() { $("detail").classList.add("hidden"); }
+
 function setDate(d) { activeDate = d; $("clock").textContent = d || "\\u2014"; $("datePick").value = d; renderSlate(); renderRatings(); }
 function setView(v) {
   view = v;
@@ -266,6 +336,12 @@ function init() {
   $("gender").onchange = (e) => { gender = e.target.value; renderSlate(); renderRatings(); };
   $("tabSlate").onclick = () => setView("slate"); $("tabRatings").onclick = () => setView("ratings");
   $("tabMetrics").onclick = () => setView("metrics");
+  $("detail").onclick = (e) => { if (e.target.id === "detail") closeDetail(); };
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeDetail(); });
+  $("ratingsView").addEventListener("click", (e) => {
+    const tr = e.target.closest("tr[data-team]");
+    if (tr) showTrajectory(tr.dataset.team, tr.dataset.gen);
+  });
   renderMetrics();
   setView("slate");
   if (activeDate) setDate(activeDate); else $("slateView").innerHTML = '<p class="empty">No data.</p>';
