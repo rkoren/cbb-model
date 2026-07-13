@@ -46,6 +46,15 @@ def test_slate_reconstructs_team_scores_from_total_and_margin():
     assert g["our"]["prob"] == 0.70
 
 
+def test_slate_surfaces_feature_drivers_when_present():
+    row = _slate_row()
+    row["drivers"] = [{"l": "Home court", "v": 3.5}, {"l": "Elo edge", "v": 3.0}]
+    g = build_slate(_pred([row]), NAMES)["2026-03-01"][0]
+    assert g["drivers"][0] == {"l": "Home court", "v": 3.5}
+    # Absent column → None (not a crash).
+    assert build_slate(_pred([_slate_row()]), NAMES)["2026-03-01"][0]["drivers"] is None
+
+
 def test_slate_carries_abbreviations_and_total_gap():
     g = build_slate(_pred([_slate_row()]), {1101: "South Florida", 1102: "Connecticut"})["2026-03-01"][0]
     assert g["a_abbr"] == "SF" and g["b_abbr"] == "Conn"     # multi-word → initials; single → trunc

@@ -97,6 +97,7 @@ def build_slate(predictions_log: pd.DataFrame, name_map: dict[int, str]) -> dict
                        "won": None if pd.isna(d["Outcome"]) else int(d["Outcome"])},
             "gap_margin": gap,   # our margin − KenPom's (spread disagreement; the sort key)
             "gap_total": gap_total,  # our total − KenPom's (total disagreement)
+            "drivers": d.get("drivers"),  # DASH-006: top XGBoost margin contributions (or None)
         }
         slate.setdefault(_iso(d["game_date"]), []).append(game)
 

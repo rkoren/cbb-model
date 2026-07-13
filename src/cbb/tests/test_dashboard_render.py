@@ -61,3 +61,10 @@ def test_render_wires_trajectory_drilldown():
     for marker in ("function lineChart", "function showTrajectory", "data-team=",
                    'id="detail"', "#detail.hidden"):   # the specificity override that keeps it hidden
         assert marker in html, marker
+
+
+def test_render_wires_game_detail():
+    html = render_html(_payload())
+    # DASH-006 part 2: clickable slate rows + game-detail modal with moneyline + driver bars.
+    for marker in ("function showGame", "function moneyline", "data-gidx=", "feature drivers"):
+        assert marker in html, marker
