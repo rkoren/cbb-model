@@ -59,6 +59,26 @@ def test_daynum_doubleheader_uses_pre_day_snapshot():
     assert d3.W_bs_OE_asof.nunique() == 1  # identical → both used the pre-DayNum-3 snapshot
 
 
+def test_nan_boxscore_game_does_not_corrupt_state():
+    # A score-only game (NaN box-score detail, e.g. the 2026 tournament holdout) must be skipped
+    # in the accumulator: the team carries its last *known* as-of state into its next game,
+    # rather than emitting NaN. Games 1–2 build state; game 3 has NaN detail; game 4's emit must
+    # equal what game 3's would have been (games 1–2 only), NOT NaN.
+    raw = pd.DataFrame([
+        _game(1, 1101, 1201, 80, 60), _game(2, 1101, 1202, 80, 60),
+        _game(3, 1101, 1203, 70, 68, wfga=np.nan, wor=np.nan, wto=np.nan, wfta=np.nan),
+        _game(4, 1101, 1204, 75, 70),
+    ])
+    out = compute_rolling_boxscore(raw, 0, min_games=2)
+    g3 = out[(out.WTeamID == 1101) & (out.DayNum == 3)].iloc[0]
+    g4 = out[(out.WTeamID == 1101) & (out.DayNum == 4)].iloc[0]
+    poss = _poss(60, 10, 12, 20)
+    expected = 100 * 80 / poss  # OE from games 1–2 only
+    assert g3.W_bs_OE_asof == pytest.approx(expected)   # game 3 emits from prior clean state
+    assert g4.W_bs_OE_asof == pytest.approx(expected)   # game 3's NaN detail didn't update state
+    assert np.isfinite(g4.W_bs_OE_asof)
+
+
 def test_ot_normalizes_tempo():
     # Same box line, one game OT: OT game's possessions divide by (40+5)/40 → lower per-40 tempo.
     base = [_game(1, 1101, 1201, 80, 60), _game(2, 1101, 1202, 80, 60)]

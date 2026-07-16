@@ -21,6 +21,7 @@ cold-start. No cross-season carryover — rosters turn over and the priors alrea
 
 from __future__ import annotations
 
+import math
 from collections import defaultdict
 
 import pandas as pd
@@ -94,6 +95,12 @@ def compute_rolling_boxscore(
                 adjot = (40 + 5 * getattr(r, "NumOT", 0)) / 40
                 wposs = _poss(r.WFGA, r.WOR, r.WTO, r.WFTA)
                 lposs = _poss(r.LFGA, r.LOR, r.LTO, r.LFTA)
+                # Skip games with unknown box-score detail (NaN possessions) — e.g. score-only
+                # results (the 2026 tournament holdout) — so they don't corrupt the accumulator;
+                # a team's later games then carry its last *known* as-of state forward. No-op on
+                # real Kaggle detailed results (always complete → possessions never NaN).
+                if math.isnan(wposs) or math.isnan(lposs):
+                    continue
                 state[w].update(r.WScore, r.LScore, wposs, lposs, adjot)
                 state[l].update(r.LScore, r.WScore, lposs, wposs, adjot)
 

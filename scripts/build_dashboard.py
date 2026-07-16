@@ -147,6 +147,42 @@ def _feature_drivers(reg_games: pd.DataFrame, model, season: int, top: int = 5) 
             for i, r in enumerate(g.itertuples(index=False))}
 
 
+def _holdout_tourney_detail(season: int) -> pd.DataFrame | None:
+    """Score-only tournament results → Kaggle-detail schema (box-score columns left NaN).
+
+    Kaggle's ``NCAATourneyDetailedResults`` lags ~a year, so a just-finished bracket (2026) is
+    hand-sourced into ``data/holdout/tourney_results_{season}.csv`` (Season, WTeamID, LTeamID,
+    WScore, LScore). Two gaps to fill vs the Kaggle schema: **DayNum** (round ordering + the
+    FanMatch date-match) is recovered from the bracket template's ``DateOfGame`` via an unordered
+    team-pair join; **box-score detail** is unknown, so those columns are left absent → NaN on
+    concat. The GM-003 rolling as-of guard skips NaN-possession games, so each team carries its
+    Selection-Sunday box-score state through the bracket (Selection-Sunday-pure, per GM-007).
+    Returns None when the season isn't hand-sourced (falls back to Kaggle only).
+    """
+    res_path = Path("data/holdout") / f"tourney_results_{season}.csv"
+    tmpl_path = Path("data/holdout") / f"{season}_template.csv"
+    if not (res_path.exists() and tmpl_path.exists()):
+        return None
+    res, tmpl = pd.read_csv(res_path), pd.read_csv(tmpl_path)
+    ms = pd.read_csv(RAW / "MSeasons.csv")
+    dayzero = pd.to_datetime(dict(zip(ms.Season, ms.DayZero))[season])
+
+    def _pair(a, b):
+        return tuple(sorted((int(a), int(b))))
+    tmpl["pair"] = [_pair(a, b) for a, b in zip(tmpl.A_TeamID, tmpl.B_TeamID)]
+    tmpl["DayNum"] = (pd.to_datetime(tmpl.DateOfGame) - dayzero).dt.days
+    daynum_by_pair = dict(zip(tmpl.pair, tmpl.DayNum))
+
+    res["DayNum"] = [daynum_by_pair.get(_pair(w, l)) for w, l in zip(res.WTeamID, res.LTeamID)]
+    if res.DayNum.isna().any():
+        missing = int(res.DayNum.isna().sum())
+        raise SystemExit(f"{season}: {missing} tournament game(s) had no date in {tmpl_path.name} "
+                         "— template must cover every result row to recover DayNum")
+    res["DayNum"] = res.DayNum.astype(int)
+    res["WLoc"], res["NumOT"] = "N", 0  # tournament games are neutral-site
+    return res[["Season", "DayNum", "WTeamID", "WScore", "LTeamID", "LScore", "WLoc", "NumOT"]]
+
+
 def _build_tournament_games(season: int) -> pd.DataFrame:
     """Season's tournament games with Selection-Sunday-as-of features + actuals (offline, no API).
 
@@ -161,8 +197,17 @@ def _build_tournament_games(season: int) -> pd.DataFrame:
     data = {"M_reg_raw": _rd("MRegularSeasonDetailedResults"), "W_reg_raw": _rd("WRegularSeasonDetailedResults"),
             "M_teams": _rd("MTeams"), "W_teams": _rd("WTeams")}
     combined = dict(data)
-    combined["M_reg_raw"] = pd.concat([data["M_reg_raw"], _rd("MNCAATourneyDetailedResults")], ignore_index=True)
-    combined["W_reg_raw"] = pd.concat([data["W_reg_raw"], _rd("WNCAATourneyDetailedResults")], ignore_index=True)
+    # Kaggle tournament detail (2003..~last year) + any hand-sourced score-only holdout (e.g. 2026,
+    # not yet in Kaggle). Concat aligns columns → the holdout's missing box-score detail becomes NaN.
+    m_tourney = [_rd("MNCAATourneyDetailedResults")]
+    w_tourney = [_rd("WNCAATourneyDetailedResults")]
+    already_in_kaggle = (m_tourney[0].Season == season).any() or (w_tourney[0].Season == season).any()
+    if not already_in_kaggle:
+        holdout = _holdout_tourney_detail(season)
+        if holdout is not None:  # men TeamID < 2000, women >= 3000 (Kaggle convention)
+            (m_tourney if holdout.WTeamID.iloc[0] < 2000 else w_tourney).append(holdout)
+    combined["M_reg_raw"] = pd.concat([data["M_reg_raw"], *m_tourney], ignore_index=True)
+    combined["W_reg_raw"] = pd.concat([data["W_reg_raw"], *w_tourney], ignore_index=True)
     seasons = sorted(set(combined["M_reg_raw"].Season) | set(combined["W_reg_raw"].Season))
 
     mspell, wspell = _rd("MTeamSpellings", "latin-1"), _rd("WTeamSpellings", "latin-1")
