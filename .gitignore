@@ -9,6 +9,11 @@ data/processed/*
 
 # generated dashboards (regenerate with scripts/build_dashboard.py; too large to commit per build)
 monitoring/handicapper*.html
+# generated daily slates + nightly logs (scripts/daily_slate.py, nightly.sh)
+monitoring/slate*.html
+monitoring/nightly-logs/
+# live results log (ESPN-sourced via scripts/fetch_results.py; regenerable — dvc add if you want to version it)
+data/live/
 
 # python
 __pycache__/

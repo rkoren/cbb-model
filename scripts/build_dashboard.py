@@ -38,7 +38,6 @@ from cbb.dashboard.wiring import (
 from cbb.features.adjself_asof import compute_adjself_asof_snapshots
 from cbb.features.reg_games import build_reg_games
 from cbb.features.torvik_asof import load_all_torvik_women
-from cbb.kenpom.asof_features import load_all_archive_snapshots
 from cbb.kenpom.features import build_team_name_map
 from cbb.train.reg_model import RegConfig, build_reg_predictions_log, train_reg_loto
 
@@ -147,38 +146,41 @@ def _feature_drivers(reg_games: pd.DataFrame, model, season: int, top: int = 5) 
             for i, r in enumerate(g.itertuples(index=False))}
 
 
-def _holdout_tourney_detail(season: int) -> pd.DataFrame | None:
+def _holdout_tourney_detail(res_path: Path) -> pd.DataFrame | None:
     """Score-only tournament results → Kaggle-detail schema (box-score columns left NaN).
 
     Kaggle's ``NCAATourneyDetailedResults`` lags ~a year, so a just-finished bracket (2026) is
-    hand-sourced into ``data/holdout/tourney_results_{season}.csv`` (Season, WTeamID, LTeamID,
-    WScore, LScore). Two gaps to fill vs the Kaggle schema: **DayNum** (round ordering + the
-    FanMatch date-match) is recovered from the bracket template's ``DateOfGame`` via an unordered
-    team-pair join; **box-score detail** is unknown, so those columns are left absent → NaN on
-    concat. The GM-003 rolling as-of guard skips NaN-possession games, so each team carries its
-    Selection-Sunday box-score state through the bracket (Selection-Sunday-pure, per GM-007).
-    Returns None when the season isn't hand-sourced (falls back to Kaggle only).
+    hand-sourced under ``data/holdout/`` (men: ``tourney_results_{season}.csv``; women:
+    ``tourney_results_{season}_women.csv``) as Season, WTeamID, LTeamID, WScore, LScore. **DayNum**
+    (round ordering) is taken from the file if present, else recovered from the season's bracket
+    template's ``DateOfGame`` via an unordered team-pair join. **Box-score detail** is unknown, so
+    those columns are left absent → NaN on concat; the GM-003 rolling as-of guard skips
+    NaN-possession games, so each team carries its Selection-Sunday box-score state through the
+    bracket (Selection-Sunday-pure, per GM-007). Returns None when the file doesn't exist.
     """
-    res_path = Path("data/holdout") / f"tourney_results_{season}.csv"
-    tmpl_path = Path("data/holdout") / f"{season}_template.csv"
-    if not (res_path.exists() and tmpl_path.exists()):
+    if not res_path.exists():
         return None
-    res, tmpl = pd.read_csv(res_path), pd.read_csv(tmpl_path)
-    ms = pd.read_csv(RAW / "MSeasons.csv")
-    dayzero = pd.to_datetime(dict(zip(ms.Season, ms.DayZero))[season])
+    res = pd.read_csv(res_path)
+    season = int(res.Season.iloc[0])
+    if "DayNum" not in res.columns:  # recover round ordering from the bracket template's dates
+        tmpl_path = Path("data/holdout") / f"{season}_template.csv"
+        if not tmpl_path.exists():
+            raise SystemExit(f"{res_path.name}: no DayNum column and no {tmpl_path.name} to recover it")
+        tmpl = pd.read_csv(tmpl_path)
+        ms = pd.read_csv(RAW / "MSeasons.csv")
+        dayzero = pd.to_datetime(dict(zip(ms.Season, ms.DayZero))[season])
 
-    def _pair(a, b):
-        return tuple(sorted((int(a), int(b))))
-    tmpl["pair"] = [_pair(a, b) for a, b in zip(tmpl.A_TeamID, tmpl.B_TeamID)]
-    tmpl["DayNum"] = (pd.to_datetime(tmpl.DateOfGame) - dayzero).dt.days
-    daynum_by_pair = dict(zip(tmpl.pair, tmpl.DayNum))
-
-    res["DayNum"] = [daynum_by_pair.get(_pair(w, l)) for w, l in zip(res.WTeamID, res.LTeamID)]
-    if res.DayNum.isna().any():
-        missing = int(res.DayNum.isna().sum())
-        raise SystemExit(f"{season}: {missing} tournament game(s) had no date in {tmpl_path.name} "
-                         "— template must cover every result row to recover DayNum")
-    res["DayNum"] = res.DayNum.astype(int)
+        def _pair(a, b):
+            return tuple(sorted((int(a), int(b))))
+        tmpl["pair"] = [_pair(a, b) for a, b in zip(tmpl.A_TeamID, tmpl.B_TeamID)]
+        tmpl["DayNum"] = (pd.to_datetime(tmpl.DateOfGame) - dayzero).dt.days
+        daynum_by_pair = dict(zip(tmpl.pair, tmpl.DayNum))
+        res["DayNum"] = [daynum_by_pair.get(_pair(w, l)) for w, l in zip(res.WTeamID, res.LTeamID)]
+        if res.DayNum.isna().any():
+            missing = int(res.DayNum.isna().sum())
+            raise SystemExit(f"{season}: {missing} tournament game(s) had no date in {tmpl_path.name} "
+                             "— template must cover every result row to recover DayNum")
+        res["DayNum"] = res.DayNum.astype(int)
     res["WLoc"], res["NumOT"] = "N", 0  # tournament games are neutral-site
     return res[["Season", "DayNum", "WTeamID", "WScore", "LTeamID", "LScore", "WLoc", "NumOT"]]
 
@@ -203,27 +205,34 @@ def _build_tournament_games(season: int) -> pd.DataFrame:
     w_tourney = [_rd("WNCAATourneyDetailedResults")]
     already_in_kaggle = (m_tourney[0].Season == season).any() or (w_tourney[0].Season == season).any()
     if not already_in_kaggle:
-        holdout = _holdout_tourney_detail(season)
-        if holdout is not None:  # men TeamID < 2000, women >= 3000 (Kaggle convention)
-            (m_tourney if holdout.WTeamID.iloc[0] < 2000 else w_tourney).append(holdout)
+        for fname in (f"tourney_results_{season}.csv", f"tourney_results_{season}_women.csv"):
+            holdout = _holdout_tourney_detail(Path("data/holdout") / fname)
+            if holdout is not None:  # men TeamID < 2000, women >= 3000 (Kaggle convention)
+                (m_tourney if holdout.WTeamID.iloc[0] < 2000 else w_tourney).append(holdout)
     combined["M_reg_raw"] = pd.concat([data["M_reg_raw"], *m_tourney], ignore_index=True)
     combined["W_reg_raw"] = pd.concat([data["W_reg_raw"], *w_tourney], ignore_index=True)
     seasons = sorted(set(combined["M_reg_raw"].Season) | set(combined["W_reg_raw"].Season))
 
-    mspell, wspell = _rd("MTeamSpellings", "latin-1"), _rd("WTeamSpellings", "latin-1")
-    m_maps = {s: build_team_name_map(
-        data["M_teams"], pd.read_parquet(KP / "archive" / f"kenpom_archive_{s}.parquet")[["TeamName"]].drop_duplicates(), mspell)
-        for s in seasons if (KP / "archive" / f"kenpom_archive_{s}.parquet").exists()}
+    wspell = _rd("WTeamSpellings", "latin-1")
     w_maps = {s: build_team_name_map(
         data["W_teams"], pd.read_parquet(Path("data/torvik") / f"torvik_women_{s}.parquet").rename(
             columns={"team": "TeamName"})[["TeamName"]].drop_duplicates(), wspell)
         for s in seasons if (Path("data/torvik") / f"torvik_women_{s}.parquet").exists()}
     dayzero_s = dict(zip(_rd("MSeasons").Season, pd.to_datetime(_rd("MSeasons").DayZero)))
 
-    kp = load_all_archive_snapshots(seasons, KP / "archive", m_maps)
+    # WM-002 (independence): the reg model dropped KenPom kp_*_asof for self-computed adjself_*_asof
+    # (both genders, all seasons). Mirror src/features/run.py — compute weekly reverse-KenPom
+    # snapshots from the REG-ONLY games (LAST_DAYNUM=133 → Selection-Sunday cutoff, so no tournament
+    # game leaks into a snapshot) and feed those (not KenPom) to the model, alongside Torvik women's
+    # as-of. KenPom archive still powers the dashboard's ratings/FanMatch *comparator* (attached
+    # separately in build_tournament) — it's just no longer a model feature.
+    reg_sym = pd.concat([normalize_games(data["M_reg_raw"], men_women=0),
+                         normalize_games(data["W_reg_raw"], men_women=1)], ignore_index=True)
+    adjself_snaps = compute_adjself_asof_snapshots(reg_sym, dayzero_s)
     tv = load_all_torvik_women(seasons, Path("data/torvik"), w_maps)
     games = build_reg_games(combined, pd.read_parquet(DATA / "adj_eff.parquet"),
-                            asof_snapshots=kp, dayzero_by_season=dayzero_s, torvik_women_snapshots=tv)
+                            asof_snapshots=None, dayzero_by_season=dayzero_s,
+                            torvik_women_snapshots=tv, adjself_snapshots=adjself_snaps)
     return dedupe_symmetric(games[(games["DayNum"] >= TOURN_DAYNUM) & (games["Season"] == season)]).reset_index(drop=True)
 
 

@@ -88,9 +88,19 @@ def score_predictions(
     All three predictors (FanMatch, our model) are scored through this same function on the same
     ``matched`` rows, so the comparison is strictly apples-to-apples.
     """
+    margin, total, home_wp = np.asarray(margin), np.asarray(total), np.asarray(home_wp)
+    act_margin = matched["act_margin"].to_numpy()
+    act_total = matched["act_total"].to_numpy()
+    home_won = matched["home_won"].to_numpy()
+    c = 7.0  # logistic-spread transform scale (spread-quality metric; orientation-invariant)
+
+    def L(x):
+        return 1.0 / (1.0 + np.exp(-x / c))
     return {
-        "margin_mae": float(np.abs(np.asarray(margin) - matched["act_margin"].to_numpy()).mean()),
-        "total_mae": float(np.abs(np.asarray(total) - matched["act_total"].to_numpy()).mean()),
-        "brier": float(((np.asarray(home_wp) - matched["home_won"].to_numpy()) ** 2).mean()),
+        "margin_mae": float(np.abs(margin - act_margin).mean()),
+        "total_mae": float(np.abs(total - act_total).mean()),
+        "brier": float(((home_wp - home_won) ** 2).mean()),
+        "logistic": float(((L(margin) - L(act_margin)) ** 2).mean()),
+        "acc": float(((home_wp >= 0.5).astype(int) == home_won).mean()),
         "n": int(len(matched)),
     }

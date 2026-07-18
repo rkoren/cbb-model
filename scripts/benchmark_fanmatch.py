@@ -57,7 +57,7 @@ def _staleness(m: pd.DataFrame, dayzero: pd.Timestamp) -> pd.Series:
 
 def _line(label, s):
     print(f"  {label:16} margin_MAE {s['margin_mae']:6.3f}   total_MAE {s['total_mae']:6.3f}   "
-          f"Brier {s['brier']:.4f}   (n={s['n']})")
+          f"Brier {s['brier']:.4f}   logistic {s['logistic']:.4f}   win% {s['acc']:.3f}   (n={s['n']})")
 
 
 def main() -> None:

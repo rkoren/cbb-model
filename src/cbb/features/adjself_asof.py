@@ -35,7 +35,10 @@ ADJSELF_COLS: dict[str, str] = {b: f"adjself_{b}_asof" for b in _BASES}
 ADJSELF_FEATURES: list[str] = list(ADJSELF_COLS.values())
 
 # Weekly cutoffs across the regular season (DayZero ≈ early Nov, Selection Sunday ≈ DayNum 132).
-# Matches the validated spike grid; the last snapshot carries late-season games to the tournament.
+# STEP=7 (weekly): a daily (STEP=1) trial (2026-07-16) was a noise-level wash on the FanMatch gap
+# (margin −0.017 / total +0.017, swapped) at 7× the reverse-KenPom solves — cadence is not the lever;
+# the residual gap is KenPom's rating *quality*, not freshness. Reverted. Last snapshot carries
+# late-season games to the tournament.
 FIRST_DAYNUM, LAST_DAYNUM, STEP = 14, 133, 7
 
 _EMPTY = pd.DataFrame(columns=["Season", "TeamID", "ArchiveDate", *ADJSELF_FEATURES])
