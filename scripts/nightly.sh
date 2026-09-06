@@ -4,6 +4,7 @@
 # Schedule via launchd (see the plist snippet in scripts/README-nightly.md) or `crontab -e`.
 set -euo pipefail
 cd "$(dirname "$0")/.."                      # repo root
+set -a; [ -f .env ] && . ./.env; set +a     # export .env (launchd doesn't inherit your shell env) → KENPOM_API_KEY
 PY=.venv/bin/python
 LOGDIR=monitoring/nightly-logs; mkdir -p "$LOGDIR"
 TODAY=$(date +%F)

@@ -27,6 +27,7 @@ from cbb.features.reg_games import build_reg_games  # noqa: E402
 from cbb.kenpom.features import build_team_name_map  # noqa: E402
 
 RAW, PROC, KP = Path("data/raw"), Path("data/processed"), Path("data/kenpom")
+SCOPE_SEASONS = 5
 
 
 def _rd(name, enc=None):
@@ -67,11 +68,15 @@ def handicap_slate(date: str, season: int) -> pd.DataFrame:
     if live_path.exists():  # keep='first' → Kaggle's exact row wins any overlap; live only adds new games
         mreg = pd.concat([mreg, pd.read_csv(live_path)], ignore_index=True).drop_duplicates(
             ["Season", "DayNum", "WTeamID", "LTeamID"], keep="first")
-    mreg = mreg[~((mreg.Season == season) & (mreg.DayNum >= daynum))]
+    # Scope to the last SCOPE_SEASONS — Elo has converged by then, so predictions match the full-history
+    # build exactly (validated in serve/handicap.py) while the Elo/box-score walk runs in seconds not minutes.
+    lo = season - SCOPE_SEASONS + 1
+    mreg = mreg[(mreg.Season >= lo) & ~((mreg.Season == season) & (mreg.DayNum >= daynum))]
     syn = pd.DataFrame({"Season": season, "DayNum": daynum, "WTeamID": fm.home_id, "LTeamID": fm.vis_id,
                         "WScore": 100, "LScore": 99, "WLoc": "H", "NumOT": 0})  # scores are placeholders (as-of ignores them)
     combined = dict(data)
     combined["M_reg_raw"] = pd.concat([mreg, syn], ignore_index=True)
+    combined["W_reg_raw"] = data["W_reg_raw"][data["W_reg_raw"].Season >= lo]  # unused (men's slate) — scope for speed
 
     games = build_reg_games(combined, pd.read_parquet(PROC / "adj_eff.parquet"), asof_snapshots=None,
                             dayzero_by_season=dz, adjself_snapshots=pd.read_parquet(PROC / "adjself_asof.parquet"))

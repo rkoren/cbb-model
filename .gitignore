@@ -43,3 +43,6 @@ infra/tf/
 CLAUDE.md
 AGENTS.md
 .claude
+
+# generated Kaggle submissions (scripts/competition_submission.py)
+data/submissions/
