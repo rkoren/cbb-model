@@ -31,6 +31,7 @@ from cbb.features import build_prediction_features  # noqa: E402
 from cbb.features.reg_games import build_reg_games  # noqa: E402
 from cbb.features.torvik_asof import load_all_torvik_women  # noqa: E402
 from cbb.kenpom.features import build_team_name_map  # noqa: E402
+from cbb.kenpom.preseason import load_preseason_priors  # noqa: E402
 from cbb.kenpom.rich_features import build_kenpom_rich_features, join_kenpom_rich  # noqa: E402
 
 RAW, PROC, KP, LIVE, OUT = Path("data/raw"), Path("data/processed"), Path("data/kenpom"), Path("data/live"), Path("data/submissions")
@@ -105,8 +106,10 @@ def reg_preds(pairs: pd.DataFrame, season: int) -> pd.DataFrame:
         if p.exists():
             w_maps[s] = build_team_name_map(data["W_teams"], pd.read_parquet(p)[["team"]].drop_duplicates().rename(columns={"team": "TeamName"}), wspell)
     tv = load_all_torvik_women(seasons, Path("data/torvik"), w_maps)
+    priors = load_preseason_priors(seasons, data["M_teams"], _rd("MTeamSpellings", "latin-1"), dz)
     games = build_reg_games(comb, pd.read_parquet(PROC / "adj_eff.parquet"), asof_snapshots=None, dayzero_by_season=dz,
-                            torvik_women_snapshots=tv, adjself_snapshots=pd.read_parquet(PROC / "adjself_asof.parquet"))
+                            torvik_women_snapshots=tv, adjself_snapshots=pd.read_parquet(PROC / "adjself_asof.parquet"),
+                            season_priors=priors)
     t = dedupe_symmetric(games[(games.Season == season) & (games.DayNum == TOURN_DAYNUM)]).copy()
     model = pickle.load(open(PROC / "reg_model.pkl", "rb")); feats = model.margin_features + model.total_features
     for f in feats:

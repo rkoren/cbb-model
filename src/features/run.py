@@ -362,6 +362,14 @@ def build(params: dict, store: DataStore) -> None:
         # the M6 dashboard's ours-vs-KenPom comparison. DASH-001 will consume it.
         _asof_snaps, torvik_women, dayzero = _load_asof_inputs(seasons, team_maps, store)
 
+        # KenPom preseason projection + roster priors (season-constant, leak-free; men 2012+): the
+        # early-season seed — the October projection knows *this year's* roster where *_prev knows
+        # last year's. In-season strength stays self-computed (adjself); KenPom is the calibration
+        # prior only. Offline (archive/height parquets); persisted for the serving/benchmark scripts.
+        from cbb.kenpom.preseason import load_preseason_priors  # noqa: PLC0415
+        season_priors = load_preseason_priors(seasons, data["M_teams"], team_spellings, dayzero, KENPOM_DIR)
+        store.save_parquet(season_priors, "season_priors.parquet")
+
         # WM-002 (independence): self-computed weekly as-of efficiency is the reg model's within-season
         # strength signal — both genders, every season — replacing KenPom's kp_*_asof.
         adjself_snaps = compute_adjself_asof_snapshots(reg_sym, dayzero)
@@ -369,7 +377,7 @@ def build(params: dict, store: DataStore) -> None:
 
         reg_games = build_reg_games(data, adj_eff, asof_snapshots=None,
                                     dayzero_by_season=dayzero, torvik_women_snapshots=torvik_women,
-                                    adjself_snapshots=adjself_snaps)
+                                    adjself_snapshots=adjself_snaps, season_priors=season_priors)
         store.save_parquet(reg_games, "reg_games.parquet")
         log.info(
             "Reg-season game dataset → %s  (%d rows, %d cols, seasons %d-%d)",

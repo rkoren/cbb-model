@@ -182,6 +182,7 @@ def build_reg_games(
     dayzero_by_season: dict | None = None,
     torvik_women_snapshots: pd.DataFrame | None = None,
     adjself_snapshots: pd.DataFrame | None = None,
+    season_priors: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Build the combined men's + women's regular-season game-level dataset.
 
@@ -198,6 +199,12 @@ def build_reg_games(
         adjself_snapshots: Optional long frame of *self-computed* weekly as-of efficiency snapshots
             (WM-002), from :func:`cbb.features.adjself_asof.compute_adjself_asof_snapshots`. Joined
             as ``*_adjself_*_asof`` — the reg model's within-season strength signal (both genders).
+        season_priors: Optional season-constant frame keyed ``(Season, TeamID)`` from
+            :func:`cbb.kenpom.preseason.load_preseason_priors` — KenPom's roster-aware **preseason
+            projection** (``kp_pre_*``) + roster ``kp_Continuity``/``kp_Exp``. Joined as ``A_/B_/d_``
+            (``s_`` for the ratings), plus ``d_blend_pre_asof`` = maturity blend of the within-season
+            ``adjself_AdjEM_asof`` and the preseason ``kp_pre_AdjEM`` (the men's early-season seed;
+            the projection knows *this year's* roster where ``*_prev`` knows last year's).
 
     Returns:
         Concatenated symmetric reg-season game dataset (see :func:`build_reg_game_dataset`).
@@ -230,7 +237,35 @@ def build_reg_games(
                 if added:
                     log.info("As-of %s features joined into reg_games: %d cols", label, len(added))
 
+    if season_priors is not None and len(season_priors):
+        games = _add_season_priors(games, season_priors)
+
     _add_exptotal(games)  # totals are multiplicative (pace × efficiency), not additive sums
+    return games
+
+
+def _add_season_priors(games: pd.DataFrame, priors: pd.DataFrame) -> pd.DataFrame:
+    """Join season-constant per-team priors (``Season, TeamID, <feats>``) as ``A_/B_/d_``, then the
+    preseason→as-of maturity blend when both sides exist (``d_`` only — see the note on sums below).
+
+    Left-joins preserve row order; teams/seasons absent from ``priors`` (women, pre-2012 men, a
+    new season before its October fetch) get NaN → the trainer's uniform zero-fill, like every
+    other as-of feature.
+    """
+    feats = [c for c in priors.columns if c not in ("Season", "TeamID")]
+    for side in ("A", "B"):
+        ren = {"TeamID": f"{side}_TeamID", **{c: f"{side}_{c}" for c in feats}}
+        games = games.merge(priors.drop_duplicates(["Season", "TeamID"]).rename(columns=ren),
+                            on=["Season", f"{side}_TeamID"], how="left")
+    for c in feats:
+        games[f"d_{c}"] = games[f"A_{c}"] - games[f"B_{c}"]
+    # Deliberately NO `s_kp_pre_*` sums: the ratings reach the total head only through the
+    # pace×efficiency `s_exptot_kppre_asof` (see _add_exptotal). Raw season-constant sums let the
+    # total head key on team-season identity — LOTO total −0.013 but the 2026 holdout total +0.17
+    # (men-2026 vs FanMatch 13.82 → 13.99) at 700 rounds; the exptot alone carries the early-season
+    # total gain (men-2026 D<14 total 15.36 → 14.90) without that overfit. Measured 2026-09-06.
+    if "A_adjself_AdjEM_asof" in games.columns and "A_kp_pre_AdjEM" in games.columns:
+        _add_blend(games, asof="adjself_AdjEM_asof", prior="kp_pre_AdjEM", out="blend_pre_asof")
     return games
 
 
@@ -240,6 +275,7 @@ _EXPTOT_SOURCES = {
     "kp": ("kp_AdjOE_asof", "kp_AdjDE_asof", "kp_AdjTempo_asof"),
     "tv": ("tv_AdjOE_asof", "tv_AdjDE_asof", "tv_AdjTempo_asof"),
     "adjself": ("adjself_AdjOE_asof", "adjself_AdjDE_asof", "adjself_AdjTempo_asof"),
+    "kppre": ("kp_pre_AdjOE", "kp_pre_AdjDE", "kp_pre_AdjTempo"),  # preseason projection (season-constant)
 }
 
 

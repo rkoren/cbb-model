@@ -190,3 +190,23 @@ def test_d_elo_pre_present_and_antisymmetric():
     win = g1[g1["A_TeamID"] == 1101].iloc[0]["d_Elo_pre"]
     los = g1[g1["A_TeamID"] == 1102].iloc[0]["d_Elo_pre"]
     assert win == pytest.approx(-los)  # A/B swap negates the differential
+
+
+def test_season_priors_join_blend_and_missing():
+    from cbb.features.reg_games import _add_season_priors
+    g = pd.DataFrame({
+        "Season": [2020, 2020, 2020], "A_TeamID": [1101, 1102, 1101], "B_TeamID": [1102, 1101, 1109],
+        "A_adjself_AdjEM_asof": [np.nan, 5.0, np.nan], "B_adjself_AdjEM_asof": [5.0, np.nan, np.nan],
+        "A_games_asof": [0, 4, 0], "B_games_asof": [4, 0, 0],
+    })
+    pri = pd.DataFrame({"Season": [2020, 2020], "TeamID": [1101, 1102],
+                        "kp_pre_AdjEM": [10.0, 2.0], "kp_Continuity": [0.5, 0.3]})
+    out = _add_season_priors(g, pri)
+    assert len(out) == 3  # left join: row order + count preserved
+    assert out["d_kp_pre_AdjEM"].tolist()[:2] == [8.0, -8.0]  # antisymmetric across orientations
+    assert not [c for c in out.columns if c.startswith("s_")]  # d_ only: sums overfit the total head
+    assert out["d_kp_Continuity"].iloc[0] == pytest.approx(0.2)
+    # Blend: A (no as-of) → full prior 10; B games 4 → w=.5 → .5·5 + .5·2 = 3.5 → d = 6.5.
+    assert out["d_blend_pre_asof"].iloc[0] == pytest.approx(6.5)
+    # Team 1109 has no prior → NaN (not 0): the trainer's uniform "missing" fill, not a fake parity.
+    assert np.isnan(out["d_kp_pre_AdjEM"].iloc[2]) and np.isnan(out["B_kp_pre_AdjEM"].iloc[2])

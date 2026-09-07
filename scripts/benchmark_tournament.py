@@ -33,6 +33,7 @@ from cbb.features.adjself_asof import compute_adjself_asof_snapshots  # noqa: E4
 from cbb.features.reg_games import build_reg_games  # noqa: E402
 from cbb.features.torvik_asof import load_all_torvik_women  # noqa: E402
 from cbb.kenpom.features import build_team_name_map  # noqa: E402
+from cbb.kenpom.preseason import load_preseason_priors  # noqa: E402
 from cbb.train.model import _brier  # noqa: E402
 
 RAW, PROC, KP, TV = Path("data/raw"), Path("data/processed"), Path("data/kenpom/archive"), Path("data/torvik")
@@ -90,8 +91,9 @@ def main() -> None:
     # feeds the *_prev priors via the Season−1 join, so it must match training.
     adj_eff = pd.read_parquet(PROC / "adj_eff.parquet")
     adjself, tv, dayzero = _asof_inputs(data, seasons)
+    priors = load_preseason_priors(seasons, data["M_teams"], pd.read_csv(RAW / "MTeamSpellings.csv", encoding="latin-1"), dayzero)
     games = build_reg_games(combined, adj_eff, asof_snapshots=None, dayzero_by_season=dayzero,
-                            torvik_women_snapshots=tv, adjself_snapshots=adjself)
+                            torvik_women_snapshots=tv, adjself_snapshots=adjself, season_priors=priors)
 
     t = games[games.DayNum >= TOURN_DAYNUM].copy()
     model = pickle.load(open(PROC / "reg_model.pkl", "rb"))

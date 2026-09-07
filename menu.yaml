@@ -1,15 +1,3 @@
-# Unified platform manifest (menu.yaml) — the CBB tournament model as one file.
-#
-# Supersedes params.yaml: the same ML config, wrapped in the run `pipeline` and `recipes`
-# the kitchen platform reads. Local-first by default — SQLite tracking + S3 artifacts, no
-# AWS provisioning. Drive the whole loop with `kitchen menu run`; every `kitchen` command
-# also reads this file directly.
-#
-# Persistent-backend (AWS) path: uncomment the `mlflow-backend` rds recipe + the `provision`
-# pipeline step below and switch `mlflow.tracking_uri` to `{from_role: mlflow-backend}`.
-# NB: provisioning infra from this menu needs its OWN Terraform state (a `project` distinct
-# from `cbb-model`, which infra/cbb-model.yaml already owns) — see examples/persistent-backend.
-
 project: cbb-model
 region: us-east-1
 experiment: cbb-tournament
@@ -17,14 +5,13 @@ experiment: cbb-tournament
 pipeline: [train, evaluate]
 
 recipes:
-  # --- stages (project code; train runs features internally) ---
   features:
     kind: stage
     source: src/features/run.py
   train:
     kind: stage
     source: src/train/run.py
-    args: ["--auto-promote"]      # loto_brier is lower-is-better; auto-detected from thresholds
+    args: ["--auto-promote"]      # loto_brier is lower-is-better
   evaluate:
     kind: stage
     source: src/evaluate/run.py
@@ -44,14 +31,12 @@ recipes:
   #   security_groups: [mlflow-sg]
 
 mlflow:
-  tracking_uri: sqlite:///mlruns.db   # local store; champions persist on disk across runs
+  tracking_uri: sqlite:///mlruns.db   # local store so champions persist on disk across runs
   model_artifact_path: cbb_model
   artifact_bucket: reilly-cbb-model-data
 
-# --- ML config (carried verbatim from params.yaml) ---
-
 data:
-  source: local          # Kaggle CSVs are DVC-managed; run `dvc pull` to populate data/raw/
+  source: local
   path: data/raw
 
 secrets:
@@ -59,7 +44,6 @@ secrets:
     aws_secret: kenpom_key         # Secrets Manager bundle (us-east-1)
     key: KENPOM_API_KEY            # field within the JSON bundle
     required: true
-  # Kaggle is covered by `kitchen check`'s dedicated credential check (kaggle.json).
 
 monitor:
   reference_file: reference.parquet   # seasons <= 2023 (training distribution)
@@ -78,7 +62,7 @@ thresholds:
   loto_brier:
     max: 0.175            # CI fails if Brier degrades past this (tournament model)
   loto_brier_reg:
-    max: 0.190            # reg-season model (GM-001b); only logged on `--variant reg_season` runs
+    max: 0.190            # reg-season model, only logged on `--variant reg_season` runs
 
 features:
   raw_files:
@@ -117,39 +101,32 @@ evaluate:
   holdout_season: 2026
   metrics_file: metrics.json
 
-# Frozen 2026 holdout (CBB-017) — the platform scores every train run's model on this
-# leak-free, never-trained-on set and logs `holdout_brier`, a trusted generalization number
-# distinct from the in-CV `loto_brier`. The parquet is built (with feature parity) by the
-# features stage; absent until the 2026 results are dropped in → the platform no-ops.
-# `predict_method: predict_batch` is CBBModel's custom predict surface. `features` is omitted
-# on purpose: it defaults to `feature_candidates`, which `--variant` keeps in sync with the
-# model actually being trained (a baseline run scores its 48 features, kenpom_rich its 54).
+# Frozen 2026 holdout
 holdout:
   path: data/processed/holdout_2026.parquet
   label: Outcome
   metric: brier
   predict_method: predict_batch
 
-# Experiment variants — multi-field overlays applied with `kitchen run train --variant <name>`
-# (tagged as model_variant so leaderboard/diff group them). The kenpom_rich variant adds the
-# KenPom rich differentials that `kitchen run features` joins into matchups.
+# Experiment variants
 variants:
   kenpom_rich:
     model:
       variant: kenpom_rich     # so the run's model_variant tag matches (leaderboard/diff)
     feature_candidates:
-      # KP-006 dropped d_kp_Exp/d_kp_Bench/d_kp_Continuity (minutes-weighted → leaky).
+      # dropped d_kp_Exp/d_kp_Bench/d_kp_Continuity (minutes-weighted -> leaky)
       add: [d_kp_APL_Def, d_kp_APL_Off, d_kp_Luck, d_kp_SOS,
             d_kp_AvgHgt, d_kp_HgtEff]
-  # GM-001b: trains the *parallel* regular-season game-level model (own `cbb-reg-model` champion).
+  # trains the *parallel* regular-season game-level model (own `cbb-reg-model` champion).
   # The target switch in src/train/run.py loads reg_games.parquet and trains margin+total+calibrator.
   #   kitchen run train --variant reg_season --auto-promote \
   #       --promote-metric loto_brier_reg --lower-is-better --model-name cbb-reg-model
   reg_season:
     model:
       target: reg_season
+      num_rounds: 700
 
-# Feature columns sent to XGBoost (filtered to those present in matchup DataFrame)
+# Feature columns sent to XGBoost
 feature_candidates:
   - men_women
   - d_AdjEM

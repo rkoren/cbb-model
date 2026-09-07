@@ -25,6 +25,7 @@ import pandas as pd
 sys.path.insert(0, "src")
 from cbb.features.reg_games import build_reg_games  # noqa: E402
 from cbb.kenpom.features import build_team_name_map  # noqa: E402
+from cbb.kenpom.preseason import load_preseason_priors  # noqa: E402
 
 RAW, PROC, KP = Path("data/raw"), Path("data/processed"), Path("data/kenpom")
 SCOPE_SEASONS = 5
@@ -78,8 +79,10 @@ def handicap_slate(date: str, season: int) -> pd.DataFrame:
     combined["M_reg_raw"] = pd.concat([mreg, syn], ignore_index=True)
     combined["W_reg_raw"] = data["W_reg_raw"][data["W_reg_raw"].Season >= lo]  # unused (men's slate) — scope for speed
 
+    priors = load_preseason_priors(list(range(lo, season + 1)), data["M_teams"], _rd("MTeamSpellings", "latin-1"), dz, KP)
     games = build_reg_games(combined, pd.read_parquet(PROC / "adj_eff.parquet"), asof_snapshots=None,
-                            dayzero_by_season=dz, adjself_snapshots=pd.read_parquet(PROC / "adjself_asof.parquet"))
+                            dayzero_by_season=dz, adjself_snapshots=pd.read_parquet(PROC / "adjself_asof.parquet"),
+                            season_priors=priors)
     t = games[(games.Season == season) & (games.DayNum == daynum) & (games.A_TeamID.isin(fm.home_id))].copy()
 
     model = pickle.load(open(PROC / "reg_model.pkl", "rb"))

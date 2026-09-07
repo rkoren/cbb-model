@@ -14,8 +14,9 @@ from pathlib import Path
 import pandas as pd
 
 from cbb.features.reg_games import build_reg_games
+from cbb.kenpom.preseason import load_preseason_priors
 
-RAW, PROC, LIVE = Path("data/raw"), Path("data/processed"), Path("data/live")
+RAW, PROC, LIVE, KP = Path("data/raw"), Path("data/processed"), Path("data/live"), Path("data/kenpom")
 SCOPE_SEASONS = 5  # current + 4 prior — Elo has converged; keeps the build fast
 
 
@@ -30,6 +31,7 @@ class Engine:
     model: object
     adj_eff: pd.DataFrame
     adjself: pd.DataFrame
+    priors: pd.DataFrame          # KenPom preseason projection + roster (season-constant)
     dayzero: dict
     mreg: pd.DataFrame            # Kaggle history + live results log (men)
     wreg: pd.DataFrame
@@ -51,11 +53,14 @@ def load_engine() -> Engine:
     name_to_id = {str(r.TeamName).lower(): int(r.TeamID) for r in mteams.itertuples()}
     for r in rd("MTeamSpellings", "latin-1").itertuples():
         name_to_id.setdefault(str(r.TeamNameSpelling).lower(), int(r.TeamID))
+    dayzero = dict(zip(ms.Season, pd.to_datetime(ms.DayZero)))
+    seasons = sorted(int(p.stem[-4:]) for p in (KP / "archive").glob("kenpom_archive_*.parquet"))
     return Engine(
         model=pickle.load(open(PROC / "reg_model.pkl", "rb")),
         adj_eff=pd.read_parquet(PROC / "adj_eff.parquet"),
         adjself=pd.read_parquet(PROC / "adjself_asof.parquet"),
-        dayzero=dict(zip(ms.Season, pd.to_datetime(ms.DayZero))),
+        priors=load_preseason_priors(seasons, mteams, rd("MTeamSpellings", "latin-1"), dayzero, KP),
+        dayzero=dayzero,
         mreg=mreg, wreg=rd("WRegularSeasonDetailedResults"), wteams=rd("WTeams"), mteams=mteams,
         name_to_id=name_to_id,
     )
@@ -85,7 +90,7 @@ def handicap_matchup(eng: Engine, team_a, team_b, date: str, venue: str = "home_
     data = {"M_reg_raw": pd.concat([mreg, syn], ignore_index=True),
             "W_reg_raw": eng.wreg, "M_teams": eng.mteams, "W_teams": eng.wteams}
     games = build_reg_games(data, eng.adj_eff, asof_snapshots=None,
-                            dayzero_by_season=eng.dayzero, adjself_snapshots=eng.adjself)
+                            dayzero_by_season=eng.dayzero, adjself_snapshots=eng.adjself, season_priors=eng.priors)
     t = games[(games.Season == season) & (games.DayNum == daynum) & (games.A_TeamID == a) & (games.B_TeamID == b)].copy()
     if t.empty:
         raise ValueError("matchup row not built (check team IDs / date)")

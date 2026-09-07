@@ -37,6 +37,7 @@ from cbb.dashboard.wiring import (
 )
 from cbb.features.adjself_asof import compute_adjself_asof_snapshots
 from cbb.features.reg_games import build_reg_games
+from cbb.kenpom.preseason import load_preseason_priors
 from cbb.features.torvik_asof import load_all_torvik_women
 from cbb.kenpom.features import build_team_name_map
 from cbb.train.reg_model import RegConfig, build_reg_predictions_log, train_reg_loto
@@ -230,9 +231,10 @@ def _build_tournament_games(season: int) -> pd.DataFrame:
                          normalize_games(data["W_reg_raw"], men_women=1)], ignore_index=True)
     adjself_snaps = compute_adjself_asof_snapshots(reg_sym, dayzero_s)
     tv = load_all_torvik_women(seasons, Path("data/torvik"), w_maps)
+    priors = load_preseason_priors(seasons, data["M_teams"], _rd("MTeamSpellings", "latin-1"), dayzero_s)
     games = build_reg_games(combined, pd.read_parquet(DATA / "adj_eff.parquet"),
                             asof_snapshots=None, dayzero_by_season=dayzero_s,
-                            torvik_women_snapshots=tv, adjself_snapshots=adjself_snaps)
+                            torvik_women_snapshots=tv, adjself_snapshots=adjself_snaps, season_priors=priors)
     return dedupe_symmetric(games[(games["DayNum"] >= TOURN_DAYNUM) & (games["Season"] == season)]).reset_index(drop=True)
 
 
