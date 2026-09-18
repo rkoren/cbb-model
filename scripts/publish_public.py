@@ -40,8 +40,8 @@ def main() -> None:
     if not LOG.exists():
         raise SystemExit(
             f"missing {LOG}\n"
-            "It is gitignored and not DVC-tracked, so it only exists where build_dashboard.py ran.\n"
-            "Rebuild with: python scripts/build_dashboard.py"
+            "It is DVC-tracked, not in git. Fetch it with:  dvc pull data/processed\n"
+            "Or rebuild from scratch with:  python scripts/build_dashboard.py"
         )
 
     log = pd.read_parquet(LOG)
